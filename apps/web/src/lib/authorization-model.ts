@@ -155,10 +155,12 @@ const strongAuthPermissions = new Set<Permission>([
 ]);
 
 function roleMatchesScope(role: RoleGrant, scope?: PermissionScope) {
-  if (role.scope_type === "organization") return true;
-  if (!scope) return false;
+  // Organization grants are global only when they have the canonical NULL scope ID.
+  // Any malformed grant fails closed even if it somehow bypassed database constraints.
+  if (role.scope_type === "organization") return role.scope_id === null;
+  if (!scope || role.scope_id === null) return false;
   if (role.scope_type !== scope.type) return false;
-  return role.scope_id === null || role.scope_id === scope.id;
+  return role.scope_id === scope.id;
 }
 
 export function grantsPermission(roles: readonly RoleGrant[], permission: Permission, scope?: PermissionScope) {
