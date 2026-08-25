@@ -13,7 +13,7 @@ export function parseStrongAuthAt(value: unknown): Date | null {
 }
 
 export function evaluateSessionAssurance(
-  user: { twoFactorEnabled?: boolean | null },
+  user: { twoFactorEnabled?: boolean | null | undefined },
   session: { strongAuthAt?: unknown },
 ): SessionAssurance {
   const twoFactorEnabled = user.twoFactorEnabled === true;
