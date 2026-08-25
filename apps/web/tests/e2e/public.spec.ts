@@ -17,7 +17,7 @@ test("landing is brand-neutral and does not leak the old pitch", async ({ page }
   await expectNoPageOverflow(page);
 });
 
-test("production response exposes hardened security headers", async ({ page }) => {
+test("staging response exposes hardened security headers without forcing HTTPS localhost", async ({ page }) => {
   const response = await page.goto("/");
   expect(response).not.toBeNull();
   const headers = response!.headers();
@@ -25,18 +25,27 @@ test("production response exposes hardened security headers", async ({ page }) =
   expect(headers["x-content-type-options"]).toBe("nosniff");
   expect(headers["x-frame-options"]).toBe("DENY");
   expect(headers["referrer-policy"]).toBe("strict-origin-when-cross-origin");
-  expect(headers["strict-transport-security"]).toContain("max-age=31536000");
+  expect(headers["strict-transport-security"]).toBeUndefined();
   expect(headers["permissions-policy"]).toContain("camera=()");
 
   const csp = headers["content-security-policy"] ?? "";
   expect(csp).toContain("default-src 'self'");
   expect(csp).toContain("object-src 'none'");
   expect(csp).toContain("frame-ancestors 'none'");
+  expect(csp).not.toContain("upgrade-insecure-requests");
   if (process.env.CI) {
     expect(csp).not.toContain("'unsafe-inline'");
     expect(csp).not.toContain("'unsafe-eval'");
     expect(csp).toMatch(/nonce-[A-Za-z0-9+/=]+/);
   }
+});
+
+test("sign-in fallback cannot serialize credentials into the URL", async ({ page }) => {
+  await page.goto("/sign-in");
+  const form = page.locator("form");
+  await expect(form).toHaveAttribute("method", "post");
+  await expect(form).toHaveAttribute("action", "/sign-in");
+  await expect(page).not.toHaveURL(/email=|password=/i);
 });
 
 test("application intake is visibly and server-side closed by default", async ({ page, request }) => {
