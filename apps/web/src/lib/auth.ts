@@ -1,4 +1,6 @@
 import { betterAuth } from "better-auth";
+import { admin, twoFactor } from "better-auth/plugins";
+import { passkey } from "@better-auth/passkey";
 import { Pool } from "pg";
 import { env } from "@/lib/env";
 
@@ -21,7 +23,11 @@ if (process.env.NODE_ENV !== "production") {
   globalThis.__orgAuthPool = authPool;
 }
 
+const authOrigin = new URL(env.BETTER_AUTH_URL).origin;
+const rpID = new URL(env.BETTER_AUTH_URL).hostname;
+
 export const auth = betterAuth({
+  appName: "Org OS",
   database: authPool,
   secret: env.BETTER_AUTH_SECRET,
   baseURL: env.BETTER_AUTH_URL,
@@ -44,4 +50,21 @@ export const auth = betterAuth({
     revokeSessionsOnPasswordReset: true,
   },
   trustedOrigins: [env.NEXT_PUBLIC_APP_URL],
+  plugins: [
+    // Better Auth admin is identity administration only. Org authority remains in app.role_assignment.
+    admin(),
+    twoFactor({
+      issuer: "Org OS",
+      skipVerificationOnEnable: false,
+    }),
+    passkey({
+      rpID,
+      rpName: "Org OS",
+      origin: authOrigin,
+      authenticatorSelection: {
+        residentKey: "preferred",
+        userVerification: "required",
+      },
+    }),
+  ],
 });
