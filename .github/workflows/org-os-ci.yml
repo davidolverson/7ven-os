@@ -75,13 +75,19 @@ jobs:
             IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'org_auth') THEN
               CREATE ROLE org_auth LOGIN PASSWORD 'auth-ci-password';
             END IF;
+            IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'org_migrator') THEN
+              CREATE ROLE org_migrator LOGIN PASSWORD 'migrator-ci-password';
+            END IF;
             IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'org_app') THEN
               CREATE ROLE org_app LOGIN PASSWORD 'app-ci-password';
             END IF;
           END $$;
-          GRANT CONNECT ON DATABASE org_os TO org_auth, org_app;
+          GRANT CONNECT ON DATABASE org_os TO org_auth, org_migrator, org_app;
+          GRANT CREATE ON DATABASE org_os TO org_migrator;
           CREATE SCHEMA IF NOT EXISTS auth AUTHORIZATION org_auth;
-          CREATE SCHEMA IF NOT EXISTS app AUTHORIZATION org_app;
+          CREATE SCHEMA IF NOT EXISTS app AUTHORIZATION org_migrator;
+          REVOKE CREATE ON SCHEMA app FROM PUBLIC;
+          GRANT USAGE ON SCHEMA app TO org_app;
           SQL
 
       - name: Migrate Better Auth schema
@@ -90,12 +96,26 @@ jobs:
 
       - name: Apply Org application migrations
         env:
-          PGPASSWORD: app-ci-password
+          PGPASSWORD: migrator-ci-password
         run: |
           for file in infra/db/migrations/*.sql; do
             echo "Applying $file"
-            psql -h 127.0.0.1 -U org_app -d org_os -v ON_ERROR_STOP=1 -f "$file"
+            psql -h 127.0.0.1 -U org_migrator -d org_os -v ON_ERROR_STOP=1 -f "$file"
           done
+
+      - name: Grant runtime application privileges
+        env:
+          PGPASSWORD: migrator-ci-password
+        run: |
+          psql -h 127.0.0.1 -U org_migrator -d org_os -v ON_ERROR_STOP=1 <<'SQL'
+          GRANT USAGE ON SCHEMA app TO org_app;
+          GRANT SELECT, INSERT, UPDATE ON ALL TABLES IN SCHEMA app TO org_app;
+          GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA app TO org_app;
+          ALTER DEFAULT PRIVILEGES FOR ROLE org_migrator IN SCHEMA app
+            GRANT SELECT, INSERT, UPDATE ON TABLES TO org_app;
+          ALTER DEFAULT PRIVILEGES FOR ROLE org_migrator IN SCHEMA app
+            GRANT USAGE, SELECT ON SEQUENCES TO org_app;
+          SQL
 
       - name: Create isolated E2E identity admin
         working-directory: apps/web
