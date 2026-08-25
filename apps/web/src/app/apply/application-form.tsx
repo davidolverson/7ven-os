@@ -72,7 +72,11 @@ export function ApplicationForm() {
         return;
       }
 
-      setSubmission({ kind: "success", applicationId: result.applicationId });
+      setSubmission(
+        result.applicationId
+          ? { kind: "success", applicationId: result.applicationId }
+          : { kind: "success" },
+      );
       idempotencyKey.current = null;
       formRef.current?.reset();
     } catch {
