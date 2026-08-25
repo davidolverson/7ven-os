@@ -10,6 +10,7 @@ const serverEnvSchema = z.object({
   BETTER_AUTH_URL: z.string().url(),
   PRIVACY_HASH_SECRET: z.string().min(32),
   ALLOW_PUBLIC_SIGNUP: z.enum(["true", "false"]).default("false"),
+  APPLICATION_INTAKE_ENABLED: z.enum(["true", "false"]).default("false"),
   BREAK_GLASS_PRINCIPAL: z.string().optional(),
 });
 
@@ -25,4 +26,5 @@ if (!parsed.success) {
 export const env = {
   ...parsed.data,
   allowPublicSignup: parsed.data.ALLOW_PUBLIC_SIGNUP === "true",
+  applicationIntakeEnabled: parsed.data.APPLICATION_INTAKE_ENABLED === "true",
 };
