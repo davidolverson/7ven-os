@@ -3,7 +3,13 @@ import type { QueryResultRow } from "pg";
 import { NextResponse } from "next/server";
 import { z } from "zod";
 import { requirePermission } from "@/lib/access";
-import { assignableRoleKeys, scopeTypes, type RoleKey, type ScopeType } from "@/lib/authorization-model";
+import {
+  assignableRoleKeys,
+  roleRequiresGovernanceApproval,
+  scopeTypes,
+  type RoleKey,
+  type ScopeType,
+} from "@/lib/authorization-model";
 import { writeAuditEvent } from "@/lib/audit";
 import { transaction } from "@/lib/db";
 import { accessErrorResponse, jsonError, requestIsSameOrigin } from "@/lib/request-security";
@@ -51,6 +57,10 @@ function permissionScope(scopeType: ScopeType, scopeId: string | null) {
   return { type: scopeType, id: scopeId };
 }
 
+function hasActiveBreakGlass(roles: readonly { role_key: RoleKey }[]) {
+  return roles.some((role) => role.role_key === "break_glass");
+}
+
 export async function POST(request: Request) {
   if (!requestIsSameOrigin(request)) {
     return jsonError(403, "ORIGIN_NOT_ALLOWED", "This request origin is not allowed.");
@@ -88,6 +98,15 @@ export async function POST(request: Request) {
 
   try {
     const principal = await requirePermission("roles:manage", scope);
+
+    if (roleRequiresGovernanceApproval(parsed.data.roleKey) && !hasActiveBreakGlass(principal.roles)) {
+      return jsonError(
+        403,
+        "GOVERNANCE_APPROVAL_REQUIRED",
+        "This sensitive or governance role cannot be granted through direct technical access management.",
+      );
+    }
+
     const endsAt = parsed.data.endsAt ? new Date(parsed.data.endsAt) : null;
 
     const result = await transaction(async (client) => {
