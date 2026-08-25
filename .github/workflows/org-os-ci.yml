@@ -127,6 +127,25 @@ jobs:
             GRANT USAGE, SELECT ON SEQUENCES TO org_app;
           SQL
 
+      - name: Verify database integrity invariants
+        env:
+          PGPASSWORD: migrator-ci-password
+        run: psql -h 127.0.0.1 -U org_migrator -d org_os -v ON_ERROR_STOP=1 -f infra/db/tests/001_invariants.sql
+
+      - name: Verify runtime database least privilege
+        shell: bash
+        run: |
+          set -euo pipefail
+          if PGPASSWORD=app-ci-password psql -h 127.0.0.1 -U org_app -d org_os -v ON_ERROR_STOP=1 -c 'CREATE TABLE app.__runtime_ddl_must_fail(id integer);'; then
+            echo 'ERROR: runtime role unexpectedly created DDL in app schema'
+            exit 1
+          fi
+          if PGPASSWORD=app-ci-password psql -h 127.0.0.1 -U org_app -d org_os -v ON_ERROR_STOP=1 -c 'SELECT count(*) FROM auth."user";'; then
+            echo 'ERROR: runtime app role unexpectedly read auth schema'
+            exit 1
+          fi
+          PGPASSWORD=app-ci-password psql -h 127.0.0.1 -U org_app -d org_os -v ON_ERROR_STOP=1 -c 'SELECT count(*) FROM app.application;'
+
       - name: Create isolated E2E identity admin
         working-directory: apps/web
         run: >-
