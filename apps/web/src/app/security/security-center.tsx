@@ -9,11 +9,19 @@ interface TotpSetup {
   backupCodes: string[];
 }
 
-export function SecurityCenter({ twoFactorEnabled }: { twoFactorEnabled: boolean }) {
+export function SecurityCenter({
+  twoFactorEnabled,
+  strongAuthVerified,
+  strongAuthAt,
+}: {
+  twoFactorEnabled: boolean;
+  strongAuthVerified: boolean;
+  strongAuthAt: string | null;
+}) {
   const router = useRouter();
   const [setup, setSetup] = useState<TotpSetup | null>(null);
   const [verified, setVerified] = useState(false);
-  const [pending, setPending] = useState<"enable" | "verify" | null>(null);
+  const [pending, setPending] = useState<"enable" | "verify" | "signout" | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   async function enableTotp(event: React.FormEvent<HTMLFormElement>) {
@@ -62,14 +70,39 @@ export function SecurityCenter({ twoFactorEnabled }: { twoFactorEnabled: boolean
     setPending(null);
   }
 
+  async function signOutForVerifiedSession() {
+    setPending("signout");
+    setError(null);
+    const result = await authClient.signOut();
+
+    if (result.error) {
+      setError("Sign-out failed. Your current session was not treated as upgraded.");
+      setPending(null);
+      return;
+    }
+
+    router.replace("/sign-in");
+    router.refresh();
+  }
+
   if (twoFactorEnabled && !setup) {
     return (
       <section className="card stack">
-        <span className="badge" data-tone="good">Protected</span>
-        <h2>Two-factor authentication is enabled.</h2>
+        <span className="badge" data-tone={strongAuthVerified ? "good" : undefined}>
+          {strongAuthVerified ? "Verified session" : "Enrollment complete · re-auth required"}
+        </span>
+        <h2>{strongAuthVerified ? "This session completed two-factor authentication." : "Two-factor is enrolled, but this session is not privileged."}</h2>
         <p className="muted">
-          Privileged Org OS writes require this account-level protection in addition to an authorized Org role.
+          {strongAuthVerified
+            ? `Privileged Org OS writes may use this session when the required Org role is also present${strongAuthAt ? ` · verified ${new Date(strongAuthAt).toLocaleString()}` : ""}.`
+            : "A session created before enrollment never inherits privileged authority just because the account setting changed. Sign out, sign in with your password, and complete the two-factor challenge."}
         </p>
+        {!strongAuthVerified ? (
+          <button className="button button-primary" type="button" onClick={() => void signOutForVerifiedSession()} disabled={pending !== null}>
+            {pending === "signout" ? "Signing out…" : "Sign out and verify this session"}
+          </button>
+        ) : null}
+        {error ? <div className="form-error" role="alert">{error}</div> : null}
       </section>
     );
   }
@@ -81,7 +114,7 @@ export function SecurityCenter({ twoFactorEnabled }: { twoFactorEnabled: boolean
           <span className="badge">Action required for privileged roles</span>
           <h2>Enroll an authenticator</h2>
           <p className="muted">
-            Enter your current password to begin TOTP enrollment. Enabling identity-admin access alone does not grant Org authority.
+            Enter your current password to begin TOTP enrollment. Enabling identity-admin access alone does not grant Org authority, and this existing session will still require a challenged sign-in afterward.
           </p>
         </div>
         <div className="field">
@@ -108,7 +141,7 @@ export function SecurityCenter({ twoFactorEnabled }: { twoFactorEnabled: boolean
   return (
     <section className="card stack">
       <div>
-        <span className="badge" data-tone={verified ? "good" : undefined}>{verified ? "Verified" : "Enrollment pending"}</span>
+        <span className="badge" data-tone={verified ? "good" : undefined}>{verified ? "Enrollment verified" : "Enrollment pending"}</span>
         <h2>{verified ? "Save your backup codes" : "Add Org OS to your authenticator"}</h2>
       </div>
 
@@ -145,7 +178,7 @@ export function SecurityCenter({ twoFactorEnabled }: { twoFactorEnabled: boolean
       ) : (
         <>
           <p className="muted">
-            Store these recovery codes somewhere secure and outside this browser session. They are intentionally shown here only as part of this setup flow.
+            Store these recovery codes somewhere secure and outside this browser session. They are intentionally shown here only as part of this setup flow. Privileged access still requires you to sign out and complete a challenged sign-in afterward.
           </p>
           <ul className="stack" aria-label="Two-factor backup codes">
             {setup.backupCodes.map((code) => <li key={code}><code>{code}</code></li>)}
@@ -153,14 +186,12 @@ export function SecurityCenter({ twoFactorEnabled }: { twoFactorEnabled: boolean
           <button
             className="button button-primary"
             type="button"
-            onClick={() => {
-              setSetup(null);
-              setVerified(false);
-              router.refresh();
-            }}
+            onClick={() => void signOutForVerifiedSession()}
+            disabled={pending !== null}
           >
-            I saved the backup codes
+            {pending === "signout" ? "Signing out…" : "I saved them · sign out and verify session"}
           </button>
+          {error ? <div className="form-error" role="alert">{error}</div> : null}
         </>
       )}
     </section>
