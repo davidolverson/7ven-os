@@ -17,6 +17,28 @@ BEGIN
     (person_a, 'db-invariant-a', 'DB Invariant A'),
     (person_b, 'db-invariant-b', 'DB Invariant B');
 
+  blocked := false;
+  BEGIN
+    INSERT INTO app.role_assignment (person_id, role_key, scope_type, scope_id, reason)
+    VALUES (person_a, 'member', 'team', NULL, 'DB invariant malformed team scope must fail.');
+  EXCEPTION WHEN check_violation THEN
+    blocked := true;
+  END;
+  IF NOT blocked THEN
+    RAISE EXCEPTION 'role_assignment accepted a non-organization scope with NULL scope_id';
+  END IF;
+
+  blocked := false;
+  BEGIN
+    INSERT INTO app.role_assignment (person_id, role_key, scope_type, scope_id, reason)
+    VALUES (person_a, 'member', 'organization', gen_random_uuid(), 'DB invariant malformed organization scope must fail.');
+  EXCEPTION WHEN check_violation THEN
+    blocked := true;
+  END;
+  IF NOT blocked THEN
+    RAISE EXCEPTION 'role_assignment accepted an organization scope with non-NULL scope_id';
+  END IF;
+
   INSERT INTO app.audit_event (actor_person_id, domain, action, target_type, target_id)
   VALUES (person_a, 'test', 'audit.created', 'test', 'db-invariant')
   RETURNING id INTO audit_id;
