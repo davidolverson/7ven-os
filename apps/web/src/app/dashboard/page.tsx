@@ -11,7 +11,7 @@ interface DashboardRow extends QueryResultRow {
   evidence_count: number;
   active_roster_count: number;
   open_payment_count: number;
-  open_payment_minor: string;
+  open_currency_count: number;
 }
 
 async function getDashboardSummary(personId: string) {
@@ -21,8 +21,8 @@ async function getDashboardSummary(personId: string) {
        (SELECT count(*)::int FROM app.roster_membership WHERE person_id = $1 AND ended_at IS NULL) AS active_roster_count,
        (SELECT count(*)::int FROM app.payment_obligation
          WHERE person_id = $1 AND state IN ('earned','approved','scheduled','disputed')) AS open_payment_count,
-       COALESCE((SELECT sum(amount_minor)::text FROM app.payment_obligation
-         WHERE person_id = $1 AND state IN ('earned','approved','scheduled','disputed')), '0') AS open_payment_minor`,
+       (SELECT count(DISTINCT currency)::int FROM app.payment_obligation
+         WHERE person_id = $1 AND state IN ('earned','approved','scheduled','disputed')) AS open_currency_count`,
     [personId],
   );
 
@@ -30,7 +30,7 @@ async function getDashboardSummary(personId: string) {
     evidence_count: 0,
     active_roster_count: 0,
     open_payment_count: 0,
-    open_payment_minor: "0",
+    open_currency_count: 0,
   };
 }
 
@@ -76,8 +76,10 @@ export default function DashboardPage() {
                   <h2>Recorded money</h2>
                   <span className="badge">{summary.open_payment_count} open</span>
                 </div>
-                <p className="metric">{Number(summary.open_payment_minor) / 100}</p>
-                <p className="muted">Minor-unit total across earned, approved, scheduled, or disputed obligations. Currency-specific presentation is added when multi-currency obligations are activated.</p>
+                <p className="metric">{summary.open_payment_count}</p>
+                <p className="muted">
+                  Open obligations across {summary.open_currency_count} {summary.open_currency_count === 1 ? "currency" : "currencies"}. Amounts are never summed across different currencies.
+                </p>
               </article>
 
               <article className="card stack">
@@ -87,8 +89,8 @@ export default function DashboardPage() {
                 </div>
                 {principal.roles.length ? (
                   <ul className="status-list">
-                    {principal.roles.map((role, index) => (
-                      <li className="status-row" key={`${role.role_key}-${role.scope_type}-${role.scope_id ?? "all"}-${index}`}>
+                    {principal.roles.map((role) => (
+                      <li className="status-row" key={`${role.role_key}-${role.scope_type}-${role.scope_id ?? "all"}`}>
                         <span>{role.role_key}</span>
                         <span className="muted">{role.scope_type}{role.scope_id ? ` · ${role.scope_id}` : ""}</span>
                       </li>
