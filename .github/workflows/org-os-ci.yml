@@ -55,6 +55,12 @@ jobs:
       E2E_MFA_EMAIL: e2e-mfa@example.test
       E2E_MFA_PASSWORD: E2E-MFA-Password-2026!
       E2E_MFA_PERSON_ID: 00000000-0000-4000-8000-000000000010
+      E2E_SCOPE_EMAIL: e2e-scope@example.test
+      E2E_SCOPE_PASSWORD: E2E-Scope-Password-2026!
+      E2E_SCOPE_PERSON_ID: 00000000-0000-4000-8000-000000000011
+      E2E_SCOPE_TARGET_PERSON_ID: 00000000-0000-4000-8000-000000000012
+      E2E_TEAM_A_ID: 00000000-0000-4000-8000-0000000000a1
+      E2E_TEAM_B_ID: 00000000-0000-4000-8000-0000000000b2
       E2E_BASE_URL: http://127.0.0.1:3000
 
     steps:
@@ -180,6 +186,17 @@ jobs:
           --role user
           --yes
 
+      - name: Create isolated team-scoped MFA E2E identity
+        working-directory: apps/web
+        run: >-
+          npx --yes auth@1.7.1 create-admin
+          --config src/lib/auth.ts
+          --email "$E2E_SCOPE_EMAIL"
+          --password "$E2E_SCOPE_PASSWORD"
+          --name "E2E Team Scoped Privileged"
+          --role user
+          --yes
+
       - name: Seed Org privilege without 2FA for negative authorization test
         env:
           PGPASSWORD: postgres
@@ -242,6 +259,59 @@ jobs:
              );
           SQL
 
+      - name: Seed team-scoped authorization fixtures
+        env:
+          PGPASSWORD: postgres
+        run: |
+          psql -h 127.0.0.1 -U postgres -d org_os -v ON_ERROR_STOP=1 \
+            -v scope_email="$E2E_SCOPE_EMAIL" \
+            -v scope_person_id="$E2E_SCOPE_PERSON_ID" \
+            -v target_person_id="$E2E_SCOPE_TARGET_PERSON_ID" \
+            -v team_a_id="$E2E_TEAM_A_ID" \
+            -v team_b_id="$E2E_TEAM_B_ID" <<'SQL'
+          INSERT INTO app.person_profile (id, auth_user_id, display_name, membership_status)
+          SELECT :'scope_person_id'::uuid, id, 'E2E Team Scoped Privileged', 'community'
+            FROM auth."user"
+           WHERE lower(email) = lower(:'scope_email')
+          ON CONFLICT (auth_user_id) DO UPDATE
+            SET display_name = EXCLUDED.display_name,
+                active = true,
+                updated_at = now();
+
+          INSERT INTO app.person_profile (id, auth_user_id, display_name, membership_status)
+          VALUES (:'target_person_id'::uuid, 'e2e-scope-target-auth-id', 'E2E Scope Target', 'community')
+          ON CONFLICT (auth_user_id) DO UPDATE
+            SET display_name = EXCLUDED.display_name,
+                active = true,
+                updated_at = now();
+
+          INSERT INTO app.team (id, name, game_title, division, state)
+          VALUES
+            (:'team_a_id'::uuid, 'E2E Team A', 'NBA 2K27', 'scope-proof', 'active'),
+            (:'team_b_id'::uuid, 'E2E Team B', 'NBA 2K27', 'scope-proof', 'active')
+          ON CONFLICT (id) DO UPDATE
+            SET name = EXCLUDED.name,
+                game_title = EXCLUDED.game_title,
+                division = EXCLUDED.division,
+                state = EXCLUDED.state;
+
+          INSERT INTO app.role_assignment (person_id, role_key, scope_type, scope_id, reason)
+          SELECT pp.id, 'privileged_admin', 'team', :'team_a_id'::uuid, 'CI IDOR proof: technical authority exists only inside Team A.'
+            FROM app.person_profile pp
+            JOIN auth."user" au ON au.id = pp.auth_user_id
+           WHERE lower(au.email) = lower(:'scope_email')
+             AND NOT EXISTS (
+               SELECT 1
+                 FROM app.role_assignment ra
+                WHERE ra.person_id = pp.id
+                  AND ra.role_key = 'privileged_admin'
+                  AND ra.scope_type = 'team'
+                  AND ra.scope_id = :'team_a_id'::uuid
+                  AND ra.starts_at <= now()
+                  AND (ra.ends_at IS NULL OR ra.ends_at > now())
+             );
+          SQL
+
       - name: Typecheck
         run: npm run typecheck
 
@@ -255,13 +325,25 @@ jobs:
       - name: Run adversarial browser matrix
         run: npm run test:e2e
 
-      - name: Verify positive MFA write produced exactly one audit event
+      - name: Verify positive MFA and scoped-IDOR audit evidence
         shell: bash
         run: |
           set -euo pipefail
-          count="$(PGPASSWORD=migrator-ci-password psql -h 127.0.0.1 -U org_migrator -d org_os -At -v ON_ERROR_STOP=1 -c "SELECT count(*) FROM app.audit_event WHERE domain = 'authorization' AND action = 'role.granted' AND reason = 'E2E positive strong-auth audit proof.';")"
-          if [ "$count" != "1" ]; then
-            echo "ERROR: expected exactly one positive MFA role.granted audit event, found $count"
+          mfa_count="$(PGPASSWORD=migrator-ci-password psql -h 127.0.0.1 -U org_migrator -d org_os -At -v ON_ERROR_STOP=1 -c "SELECT count(*) FROM app.audit_event WHERE domain = 'authorization' AND action = 'role.granted' AND reason = 'E2E positive strong-auth audit proof.';")"
+          if [ "$mfa_count" != "1" ]; then
+            echo "ERROR: expected exactly one positive MFA role.granted audit event, found $mfa_count"
+            exit 1
+          fi
+
+          allowed_count="$(PGPASSWORD=migrator-ci-password psql -h 127.0.0.1 -U org_migrator -d org_os -At -v ON_ERROR_STOP=1 -c "SELECT count(*) FROM app.audit_event WHERE domain = 'authorization' AND action = 'role.granted' AND reason = 'E2E Team A scoped write must succeed.';")"
+          if [ "$allowed_count" != "1" ]; then
+            echo "ERROR: expected exactly one Team A scoped role.granted audit event, found $allowed_count"
+            exit 1
+          fi
+
+          denied_count="$(PGPASSWORD=migrator-ci-password psql -h 127.0.0.1 -U org_migrator -d org_os -At -v ON_ERROR_STOP=1 -c "SELECT count(*) FROM app.audit_event WHERE domain = 'authorization' AND action = 'role.granted' AND reason = 'E2E Team B cross-scope write must be denied.';")"
+          if [ "$denied_count" != "0" ]; then
+            echo "ERROR: cross-scope Team B request produced $denied_count role.granted audit events"
             exit 1
           fi
 
