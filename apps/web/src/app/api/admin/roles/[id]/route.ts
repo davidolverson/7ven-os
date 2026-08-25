@@ -3,7 +3,7 @@ import type { QueryResultRow } from "pg";
 import { NextResponse } from "next/server";
 import { z } from "zod";
 import { requireCurrentPrincipal, requirePermission } from "@/lib/access";
-import type { RoleKey, ScopeType } from "@/lib/authorization-model";
+import { roleRequiresGovernanceApproval, type RoleKey, type ScopeType } from "@/lib/authorization-model";
 import { writeAuditEvent } from "@/lib/audit";
 import { transaction } from "@/lib/db";
 import { accessErrorResponse, jsonError, requestIsSameOrigin } from "@/lib/request-security";
@@ -26,6 +26,10 @@ function assignmentScope(assignment: AssignmentRow) {
   if (assignment.scope_type === "organization") return { type: "organization" as const };
   if (!assignment.scope_id) throw new Error("Scoped role assignment is missing a scope ID.");
   return { type: assignment.scope_type, id: assignment.scope_id };
+}
+
+function hasActiveBreakGlass(roles: readonly { role_key: RoleKey }[]) {
+  return roles.some((role) => role.role_key === "break_glass");
 }
 
 export async function PATCH(
@@ -81,9 +85,12 @@ export async function PATCH(
 
       await requirePermission("roles:manage", assignmentScope(assignment));
 
-      if (assignment.role_key === "break_glass") {
-        const actorHasBreakGlass = principal.roles.some((role) => role.role_key === "break_glass");
-        if (!actorHasBreakGlass) return { kind: "break_glass_forbidden" as const };
+      const breakGlass = hasActiveBreakGlass(principal.roles);
+      if (assignment.role_key === "break_glass" && !breakGlass) {
+        return { kind: "break_glass_forbidden" as const };
+      }
+      if (roleRequiresGovernanceApproval(assignment.role_key) && !breakGlass) {
+        return { kind: "governance_forbidden" as const };
       }
 
       if (assignment.ends_at && assignment.ends_at.getTime() <= Date.now()) {
@@ -137,6 +144,13 @@ export async function PATCH(
     }
     if (result.kind === "break_glass_forbidden") {
       return jsonError(403, "BREAK_GLASS_REQUIRES_BREAK_GLASS", "Only an active break-glass principal may revoke break-glass access.");
+    }
+    if (result.kind === "governance_forbidden") {
+      return jsonError(
+        403,
+        "GOVERNANCE_APPROVAL_REQUIRED",
+        "This sensitive or governance role cannot be revoked through direct technical access management.",
+      );
     }
 
     return NextResponse.json(
