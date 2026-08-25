@@ -1,6 +1,7 @@
 import type { Metadata, Viewport } from "next";
 import { connection } from "next/server";
 import "./globals.css";
+import "./components.css";
 
 export const metadata: Metadata = {
   title: {
