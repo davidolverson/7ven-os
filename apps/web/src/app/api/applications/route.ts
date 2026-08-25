@@ -24,7 +24,8 @@ interface ApplicationRow extends QueryResultRow {
 }
 
 function jsonError(status: number, code: string, message: string, headers?: HeadersInit) {
-  return NextResponse.json({ error: { code, message } }, { status, headers });
+  const init: ResponseInit = headers ? { status, headers } : { status };
+  return NextResponse.json({ error: { code, message } }, init);
 }
 
 function requestIsSameOrigin(request: Request) {
