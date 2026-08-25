@@ -48,6 +48,31 @@ test("identity admin does not automatically receive Org authority", async ({ pag
   expect(await response.json()).toMatchObject({ error: { code: "ACCESS_DENIED" } });
 });
 
+test("identity admin browser APIs require challenged MFA for reads and writes", async ({ page }) => {
+  await signIn(page);
+
+  const listUsers = await page.request.get("/api/auth/admin/list-users?limit=1");
+  expect(listUsers.status()).toBe(403);
+  expect(listUsers.headers()["cache-control"]).toContain("no-store");
+  expect(await listUsers.json()).toMatchObject({
+    error: {
+      code: "IDENTITY_STRONG_AUTH_REQUIRED",
+      message:
+        "A verified two-factor session is required for identity administration. Sign in again and complete the second-factor challenge.",
+    },
+  });
+
+  const revokeSessions = await page.request.post("/api/auth/admin/revoke-user-sessions", {
+    headers: { origin: baseOrigin },
+    data: { userId: "e2e-target-must-not-be-reached" },
+  });
+  expect(revokeSessions.status()).toBe(403);
+  expect(revokeSessions.headers()["cache-control"]).toContain("no-store");
+  expect(await revokeSessions.json()).toMatchObject({
+    error: { code: "IDENTITY_STRONG_AUTH_REQUIRED" },
+  });
+});
+
 test("privileged Org role without 2FA cannot perform protected writes", async ({ page }) => {
   await signIn(page, { email: privilegedEmail, password: privilegedPassword });
 
