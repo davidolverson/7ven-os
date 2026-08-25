@@ -3,12 +3,13 @@ import {
   AuthenticationRequiredError,
   requirePermission,
   type Permission,
+  type PermissionScope,
   type Principal,
 } from "@/lib/access";
 
 export async function tryPermission(
   permission: Permission,
-  scope?: { type: string; id?: string },
+  scope?: PermissionScope,
 ): Promise<{ allowed: true; principal: Principal } | { allowed: false }> {
   try {
     const principal = await requirePermission(permission, scope);
