@@ -5,10 +5,11 @@ import { getCurrentPrincipal, type Principal } from "@/lib/access";
 export async function ProtectedApp({
   children,
 }: Readonly<{
-  children: (principal: Principal) => React.ReactNode;
+  children: (principal: Principal) => React.ReactNode | Promise<React.ReactNode>;
 }>) {
   const principal = await getCurrentPrincipal();
   if (!principal) redirect("/sign-in");
 
-  return <AppShell>{children(principal)}</AppShell>;
+  const content = await children(principal);
+  return <AppShell>{content}</AppShell>;
 }
