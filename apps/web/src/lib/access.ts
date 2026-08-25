@@ -4,6 +4,7 @@ import { auth } from "@/lib/auth";
 import { query, transaction } from "@/lib/db";
 import { env } from "@/lib/env";
 import { writeAuditEvent } from "@/lib/audit";
+import { evaluateSessionAssurance } from "@/lib/session-assurance";
 import {
   grantsPermission,
   permissionRequiresStrongAuth,
@@ -117,14 +118,6 @@ function matchesBreakGlassPrincipal(authUser: { id: string; email: string }) {
   return false;
 }
 
-function parseStrongAuthAt(value: unknown): Date | null {
-  if (value instanceof Date && Number.isFinite(value.getTime())) return value;
-  if (typeof value !== "string") return null;
-
-  const parsed = new Date(value);
-  return Number.isFinite(parsed.getTime()) ? parsed : null;
-}
-
 async function ensureOneTimeBreakGlassAssignment(
   person: PersonRow,
   authUser: { id: string; email: string },
@@ -184,9 +177,7 @@ export async function getCurrentPrincipal(): Promise<Principal | null> {
 
   const user = session.user as typeof session.user & { twoFactorEnabled?: boolean };
   const sessionRecord = session.session as typeof session.session & { strongAuthAt?: Date | string | null };
-  const twoFactorEnabled = user.twoFactorEnabled === true;
-  const strongAuthAt = parseStrongAuthAt(sessionRecord.strongAuthAt);
-  const strongAuthVerified = twoFactorEnabled && strongAuthAt !== null;
+  const { twoFactorEnabled, strongAuthAt, strongAuthVerified } = evaluateSessionAssurance(user, sessionRecord);
 
   const person = await ensurePersonProfile({
     id: user.id,
