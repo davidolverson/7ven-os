@@ -10,8 +10,6 @@ import {
   type Permission,
   type PermissionScope,
   type RoleGrant,
-  type RoleKey,
-  type ScopeType,
 } from "@/lib/authorization-model";
 
 export type { Permission, PermissionScope, RoleKey, ScopeType } from "@/lib/authorization-model";
