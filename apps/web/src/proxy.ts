@@ -1,7 +1,12 @@
 import { NextRequest, NextResponse } from "next/server";
 
+function shouldUpgradeInsecureRequests() {
+  return process.env.APP_ENV === "production" && process.env.NEXT_PUBLIC_APP_URL?.startsWith("https://") === true;
+}
+
 function buildContentSecurityPolicy(nonce: string) {
   const isDev = process.env.NODE_ENV === "development";
+  const upgradeDirective = shouldUpgradeInsecureRequests() ? "upgrade-insecure-requests;" : "";
 
   return `
     default-src 'self';
@@ -16,7 +21,7 @@ function buildContentSecurityPolicy(nonce: string) {
     frame-ancestors 'none';
     worker-src 'self' blob:;
     manifest-src 'self';
-    upgrade-insecure-requests;
+    ${upgradeDirective}
   `
     .replace(/\s{2,}/g, " ")
     .trim();
