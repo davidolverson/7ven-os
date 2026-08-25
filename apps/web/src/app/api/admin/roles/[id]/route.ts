@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import type { QueryResultRow } from "pg";
 import { NextResponse } from "next/server";
 import { z } from "zod";
-import { requireCurrentPrincipal, requirePermission } from "@/lib/access";
+import { requirePermission } from "@/lib/access";
 import { roleRequiresGovernanceApproval, type RoleKey, type ScopeType } from "@/lib/authorization-model";
 import { writeAuditEvent } from "@/lib/audit";
 import { transaction } from "@/lib/db";
@@ -70,8 +70,6 @@ export async function PATCH(
   const correlationId = randomUUID();
 
   try {
-    const principal = await requireCurrentPrincipal();
-
     const result = await transaction(async (client) => {
       const selected = await client.query<AssignmentRow>(
         `SELECT id, person_id, role_key, scope_type, scope_id, starts_at, ends_at
@@ -83,9 +81,9 @@ export async function PATCH(
       const assignment = selected.rows[0];
       if (!assignment) return { kind: "missing" as const };
 
-      await requirePermission("roles:manage", assignmentScope(assignment));
-
+      const principal = await requirePermission("roles:manage", assignmentScope(assignment));
       const breakGlass = hasActiveBreakGlass(principal.roles);
+
       if (assignment.role_key === "break_glass" && !breakGlass) {
         return { kind: "break_glass_forbidden" as const };
       }
