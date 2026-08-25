@@ -2,7 +2,11 @@
 
 import { useState } from "react";
 import { useRouter } from "next/navigation";
-import { directAssignableRoleKeys, scopeTypes } from "@/lib/authorization-model";
+import {
+  directAssignableRoleKeys,
+  governanceProtectedRoleKeys,
+  scopeTypes,
+} from "@/lib/authorization-model";
 
 export interface AccessPersonOption {
   id: string;
@@ -19,6 +23,8 @@ export interface AccessAssignment {
   startsAt: string;
   endsAt: string | null;
 }
+
+const protectedRoleKeys = new Set<string>(governanceProtectedRoleKeys);
 
 function responseMessage(payload: unknown, fallback: string) {
   if (
@@ -207,7 +213,8 @@ export function AccessManager({
               <tbody>
                 {assignments.map((assignment) => {
                   const ended = assignment.endsAt ? new Date(assignment.endsAt).getTime() <= Date.now() : false;
-                  const mayRevoke = !ended && (assignment.roleKey !== "break_glass" || canRevokeBreakGlass);
+                  const protectedAuthority = assignment.roleKey === "break_glass" || protectedRoleKeys.has(assignment.roleKey);
+                  const mayRevoke = !ended && (!protectedAuthority || canRevokeBreakGlass);
                   return (
                     <tr key={assignment.id}>
                       <td>{assignment.displayName}</td>
@@ -219,7 +226,7 @@ export function AccessManager({
                           <button className="button" type="button" disabled={pending !== null} onClick={() => void revokeRole(assignment.id)}>
                             {pending === assignment.id ? "Revoking…" : "Revoke"}
                           </button>
-                        ) : "—"}
+                        ) : protectedAuthority && !ended ? "Governed" : "—"}
                       </td>
                     </tr>
                   );
