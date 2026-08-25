@@ -1,0 +1,21 @@
+{
+  "name": "org-os",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Production foundation for the esports organization operating system. Internal codename only; final brand is not locked.",
+  "engines": {
+    "node": ">=24.19.0 <25"
+  },
+  "workspaces": [
+    "apps/web"
+  ],
+  "scripts": {
+    "dev": "npm --workspace apps/web run dev",
+    "build": "npm --workspace apps/web run build",
+    "start": "npm --workspace apps/web run start",
+    "typecheck": "npm --workspace apps/web run typecheck",
+    "test:e2e": "npm --workspace apps/web run test:e2e",
+    "test:e2e:mobile": "npm --workspace apps/web run test:e2e:mobile",
+    "audit:deps": "npm audit --audit-level=high"
+  }
+}
