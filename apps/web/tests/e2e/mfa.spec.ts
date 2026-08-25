@@ -4,6 +4,11 @@ import { expect, test } from "@playwright/test";
 const mfaEmail = process.env.E2E_MFA_EMAIL ?? "e2e-mfa@example.test";
 const mfaPassword = process.env.E2E_MFA_PASSWORD ?? "E2E-MFA-Password-2026!";
 const mfaPersonId = process.env.E2E_MFA_PERSON_ID ?? "00000000-0000-4000-8000-000000000010";
+const scopeEmail = process.env.E2E_SCOPE_EMAIL ?? "e2e-scope@example.test";
+const scopePassword = process.env.E2E_SCOPE_PASSWORD ?? "E2E-Scope-Password-2026!";
+const scopeTargetPersonId = process.env.E2E_SCOPE_TARGET_PERSON_ID ?? "00000000-0000-4000-8000-000000000012";
+const teamAId = process.env.E2E_TEAM_A_ID ?? "00000000-0000-4000-8000-0000000000a1";
+const teamBId = process.env.E2E_TEAM_B_ID ?? "00000000-0000-4000-8000-0000000000b2";
 const baseOrigin = new URL(process.env.E2E_BASE_URL ?? "http://127.0.0.1:3000").origin;
 
 function decodeBase32(value: string) {
@@ -52,23 +57,19 @@ function totpCode(totpURI: string, windowOffset = 0) {
   return String(binary % 10 ** digits).padStart(digits, "0");
 }
 
-async function passwordSignIn(page: import("@playwright/test").Page) {
+async function passwordSignIn(page: import("@playwright/test").Page, email: string, password: string) {
   await page.goto("/sign-in");
-  await page.getByLabel("Email").fill(mfaEmail);
-  await page.getByLabel("Password").fill(mfaPassword);
+  await page.getByLabel("Email").fill(email);
+  await page.getByLabel("Password").fill(password);
   await page.getByRole("button", { name: "Sign in with password" }).click();
 }
 
-test.describe.configure({ mode: "serial", retries: 0 });
-
-test("real TOTP challenge creates session assurance before a privileged write", async ({ page }, testInfo) => {
-  test.skip(testInfo.project.name !== "desktop-chrome", "Stateful MFA acceptance proof runs once on isolated Chromium identity.");
-
-  await passwordSignIn(page);
+async function enrollAndChallengeTotp(page: import("@playwright/test").Page, email: string, password: string) {
+  await passwordSignIn(page, email, password);
   await expect(page).toHaveURL(/\/dashboard$/);
 
   await page.goto("/security");
-  await page.getByLabel("Current password").fill(mfaPassword);
+  await page.getByLabel("Current password").fill(password);
   await page.getByRole("button", { name: "Set up two-factor authentication" }).click();
 
   const totpURI = await page.getByLabel("Authenticator setup URI").inputValue();
@@ -77,6 +78,27 @@ test("real TOTP challenge creates session assurance before a privileged write", 
   await page.getByLabel("6-digit authenticator code").fill(totpCode(totpURI));
   await page.getByRole("button", { name: "Verify and enable" }).click();
   await expect(page.getByText("Enrollment verified", { exact: true })).toBeVisible();
+
+  return totpURI;
+}
+
+async function completeChallengedSignIn(page: import("@playwright/test").Page, email: string, password: string, totpURI: string) {
+  await page.getByRole("button", { name: /sign out and verify session/i }).click();
+  await expect(page).toHaveURL(/\/sign-in$/);
+
+  await passwordSignIn(page, email, password);
+  await expect(page).toHaveURL(/\/two-factor$/);
+  await page.getByLabel("6-digit code").fill(totpCode(totpURI, 1));
+  await page.getByRole("button", { name: "Verify", exact: true }).click();
+  await expect(page).toHaveURL(/\/dashboard$/);
+}
+
+test.describe.configure({ mode: "serial", retries: 0 });
+
+test("real TOTP challenge creates session assurance before a privileged write", async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name !== "desktop-chrome", "Stateful MFA acceptance proof runs once on isolated Chromium identity.");
+
+  const totpURI = await enrollAndChallengeTotp(page, mfaEmail, mfaPassword);
 
   const staleSessionWrite = await page.request.post("/api/admin/roles", {
     headers: { origin: baseOrigin },
@@ -98,14 +120,7 @@ test("real TOTP challenge creates session assurance before a privileged write", 
     },
   });
 
-  await page.getByRole("button", { name: /sign out and verify session/i }).click();
-  await expect(page).toHaveURL(/\/sign-in$/);
-
-  await passwordSignIn(page);
-  await expect(page).toHaveURL(/\/two-factor$/);
-  await page.getByLabel("6-digit code").fill(totpCode(totpURI, 1));
-  await page.getByRole("button", { name: "Verify", exact: true }).click();
-  await expect(page).toHaveURL(/\/dashboard$/);
+  await completeChallengedSignIn(page, mfaEmail, mfaPassword, totpURI);
 
   await page.goto("/security");
   await expect(page.getByText("Verified session", { exact: true })).toBeVisible();
@@ -140,5 +155,46 @@ test("real TOTP challenge creates session assurance before a privileged write", 
   expect(protectedEscalation.status()).toBe(403);
   expect(await protectedEscalation.json()).toMatchObject({
     error: { code: "GOVERNANCE_APPROVAL_REQUIRED" },
+  });
+});
+
+test("team-scoped authority cannot cross the Team A boundary", async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name !== "desktop-chrome", "Stateful scoped-IDOR proof runs once on isolated Chromium identity.");
+
+  const totpURI = await enrollAndChallengeTotp(page, scopeEmail, scopePassword);
+  await completeChallengedSignIn(page, scopeEmail, scopePassword, totpURI);
+
+  const allowedTeamAWrite = await page.request.post("/api/admin/roles", {
+    headers: { origin: baseOrigin },
+    data: {
+      personId: scopeTargetPersonId,
+      roleKey: "member",
+      scopeType: "team",
+      scopeId: teamAId,
+      reason: "E2E Team A scoped write must succeed.",
+      endsAt: null,
+    },
+  });
+  expect(allowedTeamAWrite.status()).toBe(201);
+  expect(await allowedTeamAWrite.json()).toMatchObject({ ok: true, replay: false });
+
+  const deniedTeamBWrite = await page.request.post("/api/admin/roles", {
+    headers: { origin: baseOrigin },
+    data: {
+      personId: scopeTargetPersonId,
+      roleKey: "member",
+      scopeType: "team",
+      scopeId: teamBId,
+      reason: "E2E Team B cross-scope write must be denied.",
+      endsAt: null,
+    },
+  });
+  expect(deniedTeamBWrite.status()).toBe(403);
+  expect(deniedTeamBWrite.headers()["cache-control"]).toContain("no-store");
+  expect(await deniedTeamBWrite.json()).toMatchObject({
+    error: {
+      code: "ACCESS_DENIED",
+      message: "You do not have permission to perform this action.",
+    },
   });
 });
