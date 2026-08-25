@@ -50,6 +50,8 @@ jobs:
       BREAK_GLASS_PRINCIPAL: ""
       E2E_ADMIN_EMAIL: e2e-admin@example.test
       E2E_ADMIN_PASSWORD: E2E-Only-Password-2026!
+      E2E_PRIVILEGED_EMAIL: e2e-privileged@example.test
+      E2E_PRIVILEGED_PASSWORD: E2E-Privileged-Password-2026!
       E2E_BASE_URL: http://127.0.0.1:3000
 
     steps:
@@ -136,6 +138,10 @@ jobs:
             echo 'ERROR: runtime app role unexpectedly read auth schema'
             exit 1
           fi
+          if PGPASSWORD=app-ci-password psql -h 127.0.0.1 -U org_app -d org_os -v ON_ERROR_STOP=1 -c 'DELETE FROM app.role_assignment;'; then
+            echo 'ERROR: runtime app role unexpectedly deleted role history'
+            exit 1
+          fi
           PGPASSWORD=app-ci-password psql -h 127.0.0.1 -U org_app -d org_os -v ON_ERROR_STOP=1 -c 'SELECT count(*) FROM app.application;'
 
       - name: Create isolated E2E identity admin
@@ -148,6 +154,48 @@ jobs:
           --name "E2E Identity Admin"
           --role admin
           --yes
+
+      - name: Create privileged E2E identity
+        working-directory: apps/web
+        run: >-
+          npx --yes auth@1.7.1 create-admin
+          --config src/lib/auth.ts
+          --email "$E2E_PRIVILEGED_EMAIL"
+          --password "$E2E_PRIVILEGED_PASSWORD"
+          --name "E2E Privileged Without 2FA"
+          --role admin
+          --yes
+
+      - name: Seed Org privilege without 2FA for negative authorization test
+        env:
+          PGPASSWORD: postgres
+        run: |
+          psql -h 127.0.0.1 -U postgres -d org_os -v ON_ERROR_STOP=1 -v privileged_email="$E2E_PRIVILEGED_EMAIL" <<'SQL'
+          INSERT INTO app.person_profile (auth_user_id, display_name, membership_status)
+          SELECT id, 'E2E Privileged Without 2FA', 'community'
+            FROM auth."user"
+           WHERE lower(email) = lower(:'privileged_email')
+          ON CONFLICT (auth_user_id) DO UPDATE
+            SET display_name = EXCLUDED.display_name,
+                active = true,
+                updated_at = now();
+
+          INSERT INTO app.role_assignment (person_id, role_key, scope_type, reason)
+          SELECT pp.id, 'privileged_admin', 'organization', 'CI negative test: Org role exists while 2FA remains disabled.'
+            FROM app.person_profile pp
+            JOIN auth."user" au ON au.id = pp.auth_user_id
+           WHERE lower(au.email) = lower(:'privileged_email')
+             AND NOT EXISTS (
+               SELECT 1
+                 FROM app.role_assignment ra
+                WHERE ra.person_id = pp.id
+                  AND ra.role_key = 'privileged_admin'
+                  AND ra.scope_type = 'organization'
+                  AND ra.scope_id IS NULL
+                  AND ra.starts_at <= now()
+                  AND (ra.ends_at IS NULL OR ra.ends_at > now())
+             );
+          SQL
 
       - name: Typecheck
         run: npm run typecheck

@@ -1,10 +1,11 @@
 import Link from "next/link";
 
 const primaryNav = [
-  { href: "/dashboard", label: "Dashboard" },
-  { href: "/applications", label: "Talent" },
-  { href: "/competition", label: "Competition" },
-  { href: "/studio", label: "Studio" },
+  { href: "/dashboard", label: "Dashboard", mobileLabel: "Dashboard" },
+  { href: "/applications", label: "Talent", mobileLabel: "Talent" },
+  { href: "/competition", label: "Competition", mobileLabel: "Compete" },
+  { href: "/studio", label: "Studio", mobileLabel: "Studio" },
+  { href: "/security", label: "Security", mobileLabel: "Security" },
 ] as const;
 
 export function AppShell({ children }: Readonly<{ children: React.ReactNode }>) {
@@ -36,8 +37,8 @@ export function AppShell({ children }: Readonly<{ children: React.ReactNode }>) 
 
       <nav className="mobile-nav" aria-label="Mobile navigation">
         {primaryNav.map((item) => (
-          <Link key={item.href} href={item.href}>
-            {item.label}
+          <Link key={item.href} href={item.href} aria-label={item.label}>
+            {item.mobileLabel}
           </Link>
         ))}
       </nav>

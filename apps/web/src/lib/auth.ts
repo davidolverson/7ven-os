@@ -32,6 +32,11 @@ export const auth = betterAuth({
   secret: env.BETTER_AUTH_SECRET,
   baseURL: env.BETTER_AUTH_URL,
   telemetry: { enabled: false },
+  disabledPaths: [
+    // Better Auth 1.7 does not apply its TOTP challenge to passkey sign-in by default.
+    // Keep passkey authentication fail-closed until Org OS tracks session assurance server-side.
+    "/sign-in/passkey",
+  ],
   advanced: {
     database: {
       joins: true,

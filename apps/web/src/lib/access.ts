@@ -2,131 +2,19 @@ import { headers } from "next/headers";
 import type { QueryResultRow } from "pg";
 import { auth } from "@/lib/auth";
 import { query, transaction } from "@/lib/db";
+import { env } from "@/lib/env";
 import { writeAuditEvent } from "@/lib/audit";
+import {
+  grantsPermission,
+  permissionRequiresStrongAuth,
+  type Permission,
+  type PermissionScope,
+  type RoleGrant,
+  type RoleKey,
+  type ScopeType,
+} from "@/lib/authorization-model";
 
-export type RoleKey =
-  | "member"
-  | "recruiter"
-  | "coach"
-  | "creator_manager"
-  | "competition_admin"
-  | "integrity_officer"
-  | "safeguarding_officer"
-  | "finance_submitter"
-  | "finance_approver"
-  | "finance_reconciler"
-  | "council"
-  | "privileged_admin"
-  | "break_glass";
-
-export type Permission =
-  | "profile:read:self"
-  | "profile:read:any"
-  | "applications:read"
-  | "applications:update"
-  | "grind:read"
-  | "grind:submit"
-  | "grind:verify"
-  | "roster:read"
-  | "roster:write"
-  | "competition:read"
-  | "competition:write"
-  | "results:submit"
-  | "results:verify"
-  | "results:certify"
-  | "creator:read"
-  | "creator:write"
-  | "cases:intake"
-  | "cases:read:restricted"
-  | "cases:update:restricted"
-  | "finance:create"
-  | "finance:approve"
-  | "finance:reconcile"
-  | "compliance:read"
-  | "compliance:write"
-  | "audit:read"
-  | "roles:manage";
-
-const rolePermissions: Record<RoleKey, readonly Permission[]> = {
-  member: ["profile:read:self", "grind:read", "grind:submit", "roster:read", "competition:read", "creator:read", "cases:intake"],
-  recruiter: ["profile:read:any", "applications:read", "applications:update", "grind:read", "grind:submit"],
-  coach: ["profile:read:any", "grind:read", "grind:submit", "roster:read", "roster:write", "competition:read"],
-  creator_manager: ["profile:read:any", "creator:read", "creator:write", "grind:read", "grind:submit"],
-  competition_admin: ["profile:read:any", "roster:read", "competition:read", "competition:write", "results:submit"],
-  integrity_officer: ["competition:read", "results:verify", "results:certify", "cases:intake", "cases:read:restricted", "cases:update:restricted", "audit:read"],
-  safeguarding_officer: ["cases:intake", "cases:read:restricted", "cases:update:restricted", "audit:read"],
-  finance_submitter: ["finance:create"],
-  finance_approver: ["finance:approve"],
-  finance_reconciler: ["finance:reconcile"],
-  council: ["profile:read:any", "applications:read", "grind:read", "roster:read", "competition:read", "creator:read", "compliance:read", "audit:read"],
-  privileged_admin: [
-    "profile:read:any",
-    "applications:read",
-    "applications:update",
-    "grind:read",
-    "grind:submit",
-    "grind:verify",
-    "roster:read",
-    "roster:write",
-    "competition:read",
-    "competition:write",
-    "results:submit",
-    "creator:read",
-    "creator:write",
-    "cases:intake",
-    "compliance:read",
-    "compliance:write",
-    "audit:read",
-    "roles:manage"
-  ],
-  break_glass: [
-    "profile:read:self",
-    "profile:read:any",
-    "applications:read",
-    "applications:update",
-    "grind:read",
-    "grind:submit",
-    "grind:verify",
-    "roster:read",
-    "roster:write",
-    "competition:read",
-    "competition:write",
-    "results:submit",
-    "results:verify",
-    "results:certify",
-    "creator:read",
-    "creator:write",
-    "cases:intake",
-    "cases:read:restricted",
-    "cases:update:restricted",
-    "finance:create",
-    "finance:approve",
-    "finance:reconcile",
-    "compliance:read",
-    "compliance:write",
-    "audit:read",
-    "roles:manage"
-  ]
-};
-
-const strongAuthPermissions = new Set<Permission>([
-  "applications:update",
-  "grind:verify",
-  "roster:write",
-  "competition:write",
-  "results:submit",
-  "results:verify",
-  "results:certify",
-  "creator:write",
-  "cases:read:restricted",
-  "cases:update:restricted",
-  "finance:create",
-  "finance:approve",
-  "finance:reconcile",
-  "compliance:write",
-  "audit:read",
-  "roles:manage",
-]);
+export type { Permission, PermissionScope, RoleKey, ScopeType } from "@/lib/authorization-model";
 
 interface PersonRow extends QueryResultRow {
   id: string;
@@ -135,11 +23,7 @@ interface PersonRow extends QueryResultRow {
   membership_status: string;
 }
 
-interface RoleRow extends QueryResultRow {
-  role_key: RoleKey;
-  scope_type: string;
-  scope_id: string | null;
-}
+interface RoleRow extends QueryResultRow, RoleGrant {}
 
 export interface Principal {
   personId: string;
@@ -218,6 +102,71 @@ async function ensurePersonProfile(authUser: { id: string; name: string; email: 
   });
 }
 
+function matchesBreakGlassPrincipal(authUser: { id: string; email: string }) {
+  const configured = env.BREAK_GLASS_PRINCIPAL;
+  if (!configured) return false;
+
+  if (configured.startsWith("user:")) {
+    return configured.slice("user:".length) === authUser.id;
+  }
+
+  if (configured.startsWith("email:")) {
+    return configured.slice("email:".length).toLowerCase() === authUser.email.toLowerCase();
+  }
+
+  return false;
+}
+
+async function ensureOneTimeBreakGlassAssignment(
+  person: PersonRow,
+  authUser: { id: string; email: string; twoFactorEnabled: boolean },
+) {
+  if (!authUser.twoFactorEnabled || !matchesBreakGlassPrincipal(authUser)) return;
+
+  await transaction(async (client) => {
+    // One global bootstrap claim. Once any break-glass assignment has existed, environment bootstrap never grants it again.
+    await client.query("SELECT pg_advisory_xact_lock(713001)");
+
+    const history = await client.query<{ id: string } & QueryResultRow>(
+      `SELECT id
+         FROM app.role_assignment
+        WHERE role_key = 'break_glass'
+        LIMIT 1`,
+    );
+
+    if (history.rows[0]) return;
+
+    const inserted = await client.query<{ id: string; ends_at: Date } & QueryResultRow>(
+      `INSERT INTO app.role_assignment (
+         person_id, role_key, scope_type, scope_id, granted_by, reason, starts_at, ends_at
+       ) VALUES ($1, 'break_glass', 'organization', NULL, NULL, $2, now(), now() + interval '60 minutes')
+       RETURNING id, ends_at`,
+      [person.id, "One-time environment break-glass bootstrap. Rotate/remove BREAK_GLASS_PRINCIPAL after administrative recovery."],
+    );
+
+    const role = inserted.rows[0];
+    if (!role) throw new Error("Break-glass bootstrap insert did not return a role assignment.");
+
+    await writeAuditEvent(
+      {
+        actorKind: "system",
+        domain: "authorization",
+        action: "role.break_glass_bootstrapped",
+        targetType: "role_assignment",
+        targetId: role.id,
+        afterState: {
+          personId: person.id,
+          roleKey: "break_glass",
+          scopeType: "organization",
+          endsAt: role.ends_at.toISOString(),
+        },
+        reason: "One-time environment bootstrap after verified 2FA enrollment",
+      },
+      client,
+    );
+  });
+}
+
 export async function getCurrentPrincipal(): Promise<Principal | null> {
   const requestHeaders = await headers();
   const session = await auth.api.getSession({ headers: requestHeaders });
@@ -225,10 +174,17 @@ export async function getCurrentPrincipal(): Promise<Principal | null> {
   if (!session) return null;
 
   const user = session.user as typeof session.user & { twoFactorEnabled?: boolean };
+  const twoFactorEnabled = user.twoFactorEnabled === true;
   const person = await ensurePersonProfile({
     id: user.id,
     name: user.name,
     email: user.email,
+  });
+
+  await ensureOneTimeBreakGlassAssignment(person, {
+    id: user.id,
+    email: user.email,
+    twoFactorEnabled,
   });
 
   const roleResult = await query<RoleRow>(
@@ -246,7 +202,7 @@ export async function getCurrentPrincipal(): Promise<Principal | null> {
     email: user.email,
     displayName: person.display_name,
     membershipStatus: person.membership_status,
-    twoFactorEnabled: user.twoFactorEnabled === true,
+    twoFactorEnabled,
     roles: roleResult.rows,
   };
 }
@@ -257,27 +213,18 @@ export async function requireCurrentPrincipal(): Promise<Principal> {
   return principal;
 }
 
-function roleMatchesScope(role: RoleRow, scope?: { type: string; id?: string }) {
-  if (role.scope_type === "organization") return true;
-  if (!scope) return false;
-  if (role.scope_type !== scope.type) return false;
-  return role.scope_id === null || role.scope_id === scope.id;
+export function principalHasPermission(principal: Principal, permission: Permission, scope?: PermissionScope) {
+  return grantsPermission(principal.roles, permission, scope);
 }
 
-export async function requirePermission(
-  permission: Permission,
-  scope?: { type: string; id?: string },
-): Promise<Principal> {
+export async function requirePermission(permission: Permission, scope?: PermissionScope): Promise<Principal> {
   const principal = await requireCurrentPrincipal();
 
-  const allowed = principal.roles.some((role) => {
-    if (!roleMatchesScope(role, scope)) return false;
-    return rolePermissions[role.role_key].includes(permission);
-  });
+  if (!principalHasPermission(principal, permission, scope)) {
+    throw new AccessDeniedError();
+  }
 
-  if (!allowed) throw new AccessDeniedError();
-
-  if (strongAuthPermissions.has(permission) && !principal.twoFactorEnabled) {
+  if (permissionRequiresStrongAuth(permission) && !principal.twoFactorEnabled) {
     throw new AccessDeniedError("Two-factor authentication is required for this privileged action.");
   }
 

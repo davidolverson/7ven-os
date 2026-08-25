@@ -6,7 +6,7 @@ import { authClient } from "@/lib/auth-client";
 
 export function SignInForm() {
   const router = useRouter();
-  const [pending, setPending] = useState<"password" | "passkey" | null>(null);
+  const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   function completeSignIn() {
@@ -16,7 +16,7 @@ export function SignInForm() {
 
   async function onSubmit(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    setPending("password");
+    setPending(true);
     setError(null);
 
     const formData = new FormData(event.currentTarget);
@@ -27,21 +27,12 @@ export function SignInForm() {
 
     if (result.error) {
       setError("Sign-in failed. Check your credentials or account status.");
-      setPending(null);
+      setPending(false);
       return;
     }
 
-    completeSignIn();
-  }
-
-  async function signInWithPasskey() {
-    setPending("passkey");
-    setError(null);
-
-    const result = await authClient.signIn.passkey();
-    if (result.error) {
-      setError("Passkey sign-in was not completed.");
-      setPending(null);
+    // The Better Auth two-factor client redirects challenged credential sign-ins to /two-factor.
+    if (result.data && "twoFactorRedirect" in result.data && result.data.twoFactorRedirect === true) {
       return;
     }
 
@@ -49,7 +40,7 @@ export function SignInForm() {
   }
 
   return (
-    <form className="card stack" method="post" action="/sign-in" onSubmit={onSubmit}>
+    <form className="card stack" method="post" onSubmit={onSubmit}>
       <div>
         <p className="eyebrow">Member access</p>
         <h2>Sign in</h2>
@@ -86,12 +77,12 @@ export function SignInForm() {
 
       {error ? <div className="form-error" role="alert">{error}</div> : null}
 
-      <button className="button button-primary" type="submit" disabled={pending !== null}>
-        {pending === "password" ? "Signing in…" : "Sign in with password"}
+      <button className="button button-primary" type="submit" disabled={pending}>
+        {pending ? "Signing in…" : "Sign in with password"}
       </button>
-      <button className="button" type="button" onClick={signInWithPasskey} disabled={pending !== null}>
-        {pending === "passkey" ? "Waiting for passkey…" : "Sign in with passkey"}
-      </button>
+      <p className="muted">
+        Passkey sign-in remains gated during the MOC security phase. Existing passkey support is not treated as a launch claim yet.
+      </p>
     </form>
   );
 }

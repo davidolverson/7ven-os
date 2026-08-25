@@ -105,6 +105,12 @@ button:disabled,
   color: var(--muted);
 }
 
+@media (max-width: 920px) {
+  .mobile-nav {
+    grid-template-columns: repeat(5, minmax(0, 1fr));
+  }
+}
+
 @media (max-width: 640px) {
   .action-row {
     display: grid;
