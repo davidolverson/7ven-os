@@ -62,16 +62,8 @@ jobs:
           node-version: 24.19.0
           package-manager-cache: false
 
-      - name: Install dependencies
-        run: npm install --include=dev --no-fund --no-audit
-
-      - name: Preserve generated lockfile evidence
-        uses: actions/upload-artifact@v6
-        with:
-          name: generated-package-lock-${{ github.run_id }}
-          path: package-lock.json
-          if-no-files-found: error
-          retention-days: 7
+      - name: Install locked dependencies
+        run: npm ci --include=dev --no-fund --no-audit
 
       - name: Dependency audit
         run: npm audit --audit-level=high
