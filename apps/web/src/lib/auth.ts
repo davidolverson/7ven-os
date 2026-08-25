@@ -63,7 +63,17 @@ export const auth = betterAuth({
     session: {
       create: {
         before: async (session, ctx) => {
-          if (!strongAuthSessionPaths.has(ctx?.path ?? "")) {
+          const path = ctx?.path ?? "";
+          const preExistingSession = ctx?.context.session?.session;
+
+          // Better Auth uses the same verify endpoints for two distinct modes:
+          // 1. an already-authenticated enrollment/re-verification flow, and
+          // 2. a password sign-in that is suspended behind a signed, single-use 2FA challenge.
+          // Only mode 2 is strong-auth assurance. In that mode Better Auth has no
+          // authenticated session in context and creates one only after consuming the
+          // validated two-factor challenge. Enrollment can also rotate/create a session,
+          // so route matching alone would incorrectly upgrade a pre-enrollment session.
+          if (!strongAuthSessionPaths.has(path) || preExistingSession) {
             return { data: session };
           }
 
