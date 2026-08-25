@@ -1,0 +1,132 @@
+name: Org OS CI
+
+on:
+  push:
+    branches:
+      - org-os-production-foundation
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: org-os-ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  quality-and-browser:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: org_os
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd="pg_isready -U postgres -d org_os"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=5
+
+    env:
+      NODE_ENV: test
+      APP_ENV: staging
+      NEXT_PUBLIC_APP_URL: http://127.0.0.1:3000
+      BETTER_AUTH_URL: http://127.0.0.1:3000
+      BETTER_AUTH_SECRET: 0123456789abcdef0123456789abcdef0123456789abcdef
+      AUTH_DATABASE_URL: postgresql://org_auth:auth-ci-password@127.0.0.1:5432/org_os?options=-c%20search_path%3Dauth
+      DATABASE_URL: postgresql://org_app:app-ci-password@127.0.0.1:5432/org_os?options=-c%20search_path%3Dapp,public
+      ALLOW_PUBLIC_SIGNUP: "false"
+      APPLICATION_INTAKE_ENABLED: "false"
+      BREAK_GLASS_PRINCIPAL: ""
+      E2E_ADMIN_EMAIL: e2e-admin@example.test
+      E2E_ADMIN_PASSWORD: E2E-Only-Password-2026!
+      E2E_BASE_URL: http://127.0.0.1:3000
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24.19.0
+
+      - name: Install dependencies
+        run: npm install --include=dev --no-fund --no-audit
+
+      - name: Dependency audit
+        run: npm audit --audit-level=high
+
+      - name: Prepare PostgreSQL roles and schemas
+        env:
+          PGPASSWORD: postgres
+        run: |
+          psql -h 127.0.0.1 -U postgres -d org_os -v ON_ERROR_STOP=1 <<'SQL'
+          DO $$ BEGIN
+            IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'org_auth') THEN
+              CREATE ROLE org_auth LOGIN PASSWORD 'auth-ci-password';
+            END IF;
+            IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'org_app') THEN
+              CREATE ROLE org_app LOGIN PASSWORD 'app-ci-password';
+            END IF;
+          END $$;
+          GRANT CONNECT ON DATABASE org_os TO org_auth, org_app;
+          CREATE SCHEMA IF NOT EXISTS auth AUTHORIZATION org_auth;
+          CREATE SCHEMA IF NOT EXISTS app AUTHORIZATION org_app;
+          SQL
+
+      - name: Migrate Better Auth schema
+        working-directory: apps/web
+        run: npx --yes auth@1.7.1 migrate --config src/lib/auth.ts --yes
+
+      - name: Apply Org application migrations
+        env:
+          PGPASSWORD: app-ci-password
+        run: |
+          for file in infra/db/migrations/*.sql; do
+            echo "Applying $file"
+            psql -h 127.0.0.1 -U org_app -d org_os -v ON_ERROR_STOP=1 -f "$file"
+          done
+
+      - name: Create isolated E2E identity admin
+        working-directory: apps/web
+        run: >-
+          npx --yes auth@1.7.1 create-admin
+          --config src/lib/auth.ts
+          --email "$E2E_ADMIN_EMAIL"
+          --password "$E2E_ADMIN_PASSWORD"
+          --name "E2E Identity Admin"
+          --role admin
+          --yes
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Production build
+        run: npm run build
+
+      - name: Install Playwright browsers
+        working-directory: apps/web
+        run: npx playwright install --with-deps chromium firefox webkit
+
+      - name: Run adversarial browser matrix
+        run: npm run test:e2e
+
+      - name: Upload Playwright evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report-${{ github.run_id }}
+          path: |
+            apps/web/playwright-report
+            apps/web/test-results
+          if-no-files-found: ignore
+          retention-days: 14
