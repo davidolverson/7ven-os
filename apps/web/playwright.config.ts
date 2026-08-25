@@ -37,12 +37,20 @@ export default defineConfig({
       use: { ...devices["Desktop Safari"], viewport: { width: 1365, height: 768 } },
     },
     {
+      name: "tablet-768",
+      use: { ...devices["Desktop Chrome"], viewport: { width: 768, height: 1024 }, isMobile: true, hasTouch: true },
+    },
+    {
       name: "mobile-chrome",
       use: { ...devices["Pixel 5"], viewport: { width: 390, height: 844 } },
     },
     {
       name: "mobile-safari",
       use: { ...devices["iPhone 13"], viewport: { width: 390, height: 844 } },
+    },
+    {
+      name: "mobile-landscape",
+      use: { ...devices["iPhone 13 landscape"], viewport: { width: 844, height: 390 } },
     },
     {
       name: "mobile-360",
