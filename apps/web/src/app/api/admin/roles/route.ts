@@ -132,6 +132,7 @@ export async function POST(request: Request) {
             AND role_key = $2
             AND scope_type = $3
             AND scope_id IS NOT DISTINCT FROM $4::uuid
+            AND revoked_at IS NULL
             AND tstzrange(starts_at, COALESCE(ends_at, 'infinity'::timestamptz), '[)')
                 && tstzrange(now(), COALESCE($5::timestamptz, 'infinity'::timestamptz), '[)')
           ORDER BY starts_at DESC
