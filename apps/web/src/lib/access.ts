@@ -30,6 +30,8 @@ export interface Principal {
   displayName: string;
   membershipStatus: string;
   twoFactorEnabled: boolean;
+  strongAuthAt: Date | null;
+  strongAuthVerified: boolean;
   roles: RoleRow[];
 }
 
@@ -115,11 +117,20 @@ function matchesBreakGlassPrincipal(authUser: { id: string; email: string }) {
   return false;
 }
 
+function parseStrongAuthAt(value: unknown): Date | null {
+  if (value instanceof Date && Number.isFinite(value.getTime())) return value;
+  if (typeof value !== "string") return null;
+
+  const parsed = new Date(value);
+  return Number.isFinite(parsed.getTime()) ? parsed : null;
+}
+
 async function ensureOneTimeBreakGlassAssignment(
   person: PersonRow,
-  authUser: { id: string; email: string; twoFactorEnabled: boolean },
+  authUser: { id: string; email: string },
+  strongAuthVerified: boolean,
 ) {
-  if (!authUser.twoFactorEnabled || !matchesBreakGlassPrincipal(authUser)) return;
+  if (!strongAuthVerified || !matchesBreakGlassPrincipal(authUser)) return;
 
   await transaction(async (client) => {
     // One global bootstrap claim. Once any break-glass assignment has existed, environment bootstrap never grants it again.
@@ -158,7 +169,7 @@ async function ensureOneTimeBreakGlassAssignment(
           scopeType: "organization",
           endsAt: role.ends_at.toISOString(),
         },
-        reason: "One-time environment bootstrap after verified 2FA enrollment",
+        reason: "One-time environment bootstrap after verified strong-auth session",
       },
       client,
     );
@@ -172,18 +183,22 @@ export async function getCurrentPrincipal(): Promise<Principal | null> {
   if (!session) return null;
 
   const user = session.user as typeof session.user & { twoFactorEnabled?: boolean };
+  const sessionRecord = session.session as typeof session.session & { strongAuthAt?: Date | string | null };
   const twoFactorEnabled = user.twoFactorEnabled === true;
+  const strongAuthAt = parseStrongAuthAt(sessionRecord.strongAuthAt);
+  const strongAuthVerified = twoFactorEnabled && strongAuthAt !== null;
+
   const person = await ensurePersonProfile({
     id: user.id,
     name: user.name,
     email: user.email,
   });
 
-  await ensureOneTimeBreakGlassAssignment(person, {
-    id: user.id,
-    email: user.email,
-    twoFactorEnabled,
-  });
+  await ensureOneTimeBreakGlassAssignment(
+    person,
+    { id: user.id, email: user.email },
+    strongAuthVerified,
+  );
 
   const roleResult = await query<RoleRow>(
     `SELECT role_key, scope_type, scope_id
@@ -201,6 +216,8 @@ export async function getCurrentPrincipal(): Promise<Principal | null> {
     displayName: person.display_name,
     membershipStatus: person.membership_status,
     twoFactorEnabled,
+    strongAuthAt,
+    strongAuthVerified,
     roles: roleResult.rows,
   };
 }
@@ -222,8 +239,8 @@ export async function requirePermission(permission: Permission, scope?: Permissi
     throw new AccessDeniedError();
   }
 
-  if (permissionRequiresStrongAuth(permission) && !principal.twoFactorEnabled) {
-    throw new AccessDeniedError("Two-factor authentication is required for this privileged action.");
+  if (permissionRequiresStrongAuth(permission) && !principal.strongAuthVerified) {
+    throw new AccessDeniedError("A verified two-factor session is required for this privileged action. Sign in again and complete the second-factor challenge.");
   }
 
   return principal;
