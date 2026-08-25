@@ -1,0 +1,49 @@
+name: Capture Green Dependency Lock
+
+on:
+  push:
+    branches:
+      - org-os-production-foundation
+    paths:
+      - .github/workflows/capture-green-lock.yml
+
+permissions:
+  actions: read
+  contents: write
+
+jobs:
+  capture-lock:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout production foundation
+        uses: actions/checkout@v7
+        with:
+          ref: org-os-production-foundation
+
+      - name: Download exact lockfile from green CI run
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >-
+          gh run download 32897961684
+          --repo davidolverson/7ven-os
+          --name generated-package-lock-32897961684
+          --dir .lock-evidence
+
+      - name: Verify and install captured lockfile
+        run: |
+          test -s .lock-evidence/package-lock.json
+          mv .lock-evidence/package-lock.json package-lock.json
+          rm -rf .lock-evidence
+          npm ci --ignore-scripts --no-audit --no-fund
+
+      - name: Commit exact green lockfile
+        run: |
+          if git diff --quiet -- package-lock.json && git ls-files --error-unmatch package-lock.json >/dev/null 2>&1; then
+            echo "package-lock.json already matches the green artifact"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add package-lock.json
+          git commit -m "build: commit dependency graph from green CI"
+          git push origin HEAD:org-os-production-foundation
