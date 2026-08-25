@@ -1,7 +1,8 @@
 import { headers } from "next/headers";
 import type { QueryResultRow } from "pg";
 import { auth } from "@/lib/auth";
-import { query } from "@/lib/db";
+import { query, transaction } from "@/lib/db";
+import { writeAuditEvent } from "@/lib/audit";
 
 export type RoleKey =
   | "member"
@@ -108,6 +109,25 @@ const rolePermissions: Record<RoleKey, readonly Permission[]> = {
   ]
 };
 
+const strongAuthPermissions = new Set<Permission>([
+  "applications:update",
+  "grind:verify",
+  "roster:write",
+  "competition:write",
+  "results:submit",
+  "results:verify",
+  "results:certify",
+  "creator:write",
+  "cases:read:restricted",
+  "cases:update:restricted",
+  "finance:create",
+  "finance:approve",
+  "finance:reconcile",
+  "compliance:write",
+  "audit:read",
+  "roles:manage",
+]);
+
 interface PersonRow extends QueryResultRow {
   id: string;
   auth_user_id: string;
@@ -127,6 +147,7 @@ export interface Principal {
   email: string;
   displayName: string;
   membershipStatus: string;
+  twoFactorEnabled: boolean;
   roles: RoleRow[];
 }
 
@@ -148,22 +169,67 @@ export class AuthenticationRequiredError extends Error {
   }
 }
 
+async function ensurePersonProfile(authUser: { id: string; name: string; email: string }): Promise<PersonRow> {
+  return transaction(async (client) => {
+    const existing = await client.query<PersonRow>(
+      `SELECT id, auth_user_id, display_name, membership_status
+         FROM app.person_profile
+        WHERE auth_user_id = $1 AND active = true
+        LIMIT 1`,
+      [authUser.id],
+    );
+
+    if (existing.rows[0]) return existing.rows[0];
+
+    const inserted = await client.query<PersonRow>(
+      `INSERT INTO app.person_profile (auth_user_id, display_name, membership_status)
+       VALUES ($1, $2, 'community')
+       ON CONFLICT (auth_user_id) DO NOTHING
+       RETURNING id, auth_user_id, display_name, membership_status`,
+      [authUser.id, authUser.name || authUser.email.split("@")[0] || "Member"],
+    );
+
+    if (inserted.rows[0]) {
+      await writeAuditEvent(
+        {
+          actorKind: "system",
+          domain: "identity",
+          action: "person_profile.provisioned",
+          targetType: "person_profile",
+          targetId: inserted.rows[0].id,
+          metadata: { membershipStatus: "community" },
+        },
+        client,
+      );
+      return inserted.rows[0];
+    }
+
+    const raced = await client.query<PersonRow>(
+      `SELECT id, auth_user_id, display_name, membership_status
+         FROM app.person_profile
+        WHERE auth_user_id = $1 AND active = true
+        LIMIT 1`,
+      [authUser.id],
+    );
+
+    const person = raced.rows[0];
+    if (!person) throw new Error("Authenticated user profile could not be provisioned.");
+    return person;
+  });
+}
+
 export async function getCurrentPrincipal(): Promise<Principal | null> {
   const requestHeaders = await headers();
   const session = await auth.api.getSession({ headers: requestHeaders });
 
   if (!session) return null;
 
-  const personResult = await query<PersonRow>(
-    `SELECT id, auth_user_id, display_name, membership_status
-       FROM app.person_profile
-      WHERE auth_user_id = $1 AND active = true
-      LIMIT 1`,
-    [session.user.id],
-  );
-
-  const person = personResult.rows[0];
-  if (!person) return null;
+  const user = session.user as typeof session.user & { twoFactorEnabled?: boolean };
+  const person = await ensurePersonProfile({
+    id: user.id,
+    name: user.name,
+    email: user.email,
+  });
 
   const roleResult = await query<RoleRow>(
     `SELECT role_key, scope_type, scope_id
@@ -177,9 +243,10 @@ export async function getCurrentPrincipal(): Promise<Principal | null> {
   return {
     personId: person.id,
     authUserId: person.auth_user_id,
-    email: session.user.email,
+    email: user.email,
     displayName: person.display_name,
     membershipStatus: person.membership_status,
+    twoFactorEnabled: user.twoFactorEnabled === true,
     roles: roleResult.rows,
   };
 }
@@ -209,5 +276,10 @@ export async function requirePermission(
   });
 
   if (!allowed) throw new AccessDeniedError();
+
+  if (strongAuthPermissions.has(permission) && !principal.twoFactorEnabled) {
+    throw new AccessDeniedError("Two-factor authentication is required for this privileged action.");
+  }
+
   return principal;
 }
