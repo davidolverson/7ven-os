@@ -20,6 +20,7 @@ interface PersonRow extends QueryResultRow {
   auth_user_id: string;
   display_name: string;
   membership_status: string;
+  active: boolean;
 }
 
 interface RoleRow extends QueryResultRow, RoleGrant {}
@@ -45,6 +46,13 @@ export class AccessDeniedError extends Error {
   }
 }
 
+export class OrganizationalAccessDisabledError extends AccessDeniedError {
+  constructor() {
+    super("Organizational access is disabled for this identity.");
+    this.name = "OrganizationalAccessDisabledError";
+  }
+}
+
 export class AuthenticationRequiredError extends Error {
   readonly status = 401;
 
@@ -54,23 +62,30 @@ export class AuthenticationRequiredError extends Error {
   }
 }
 
+function requireActivePerson(person: PersonRow | undefined): PersonRow | undefined {
+  if (!person) return undefined;
+  if (!person.active) throw new OrganizationalAccessDisabledError();
+  return person;
+}
+
 async function ensurePersonProfile(authUser: { id: string; name: string; email: string }): Promise<PersonRow> {
   return transaction(async (client) => {
     const existing = await client.query<PersonRow>(
-      `SELECT id, auth_user_id, display_name, membership_status
+      `SELECT id, auth_user_id, display_name, membership_status, active
          FROM app.person_profile
-        WHERE auth_user_id = $1 AND active = true
+        WHERE auth_user_id = $1
         LIMIT 1`,
       [authUser.id],
     );
 
-    if (existing.rows[0]) return existing.rows[0];
+    const existingPerson = requireActivePerson(existing.rows[0]);
+    if (existingPerson) return existingPerson;
 
     const inserted = await client.query<PersonRow>(
       `INSERT INTO app.person_profile (auth_user_id, display_name, membership_status)
        VALUES ($1, $2, 'community')
        ON CONFLICT (auth_user_id) DO NOTHING
-       RETURNING id, auth_user_id, display_name, membership_status`,
+       RETURNING id, auth_user_id, display_name, membership_status, active`,
       [authUser.id, authUser.name || authUser.email.split("@")[0] || "Member"],
     );
 
@@ -90,14 +105,14 @@ async function ensurePersonProfile(authUser: { id: string; name: string; email: 
     }
 
     const raced = await client.query<PersonRow>(
-      `SELECT id, auth_user_id, display_name, membership_status
+      `SELECT id, auth_user_id, display_name, membership_status, active
          FROM app.person_profile
-        WHERE auth_user_id = $1 AND active = true
+        WHERE auth_user_id = $1
         LIMIT 1`,
       [authUser.id],
     );
 
-    const person = raced.rows[0];
+    const person = requireActivePerson(raced.rows[0]);
     if (!person) throw new Error("Authenticated user profile could not be provisioned.");
     return person;
   });
@@ -195,6 +210,7 @@ export async function getCurrentPrincipal(): Promise<Principal | null> {
     `SELECT role_key, scope_type, scope_id
        FROM app.role_assignment
       WHERE person_id = $1
+        AND revoked_at IS NULL
         AND starts_at <= now()
         AND (ends_at IS NULL OR ends_at > now())`,
     [person.id],
