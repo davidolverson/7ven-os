@@ -25,6 +25,10 @@ if (process.env.NODE_ENV !== "production") {
 
 const authOrigin = new URL(env.BETTER_AUTH_URL).origin;
 const rpID = new URL(env.BETTER_AUTH_URL).hostname;
+const strongAuthSessionPaths = new Set([
+  "/two-factor/verify-totp",
+  "/two-factor/verify-backup-code",
+]);
 
 export const auth = betterAuth({
   appName: "Org OS",
@@ -34,7 +38,7 @@ export const auth = betterAuth({
   telemetry: { enabled: false },
   disabledPaths: [
     // Better Auth 1.7 does not apply its TOTP challenge to passkey sign-in by default.
-    // Keep passkey authentication fail-closed until Org OS tracks session assurance server-side.
+    // Keep passkey authentication fail-closed until Org OS can mark that session with equivalent assurance.
     "/sign-in/passkey",
   ],
   advanced: {
@@ -45,6 +49,33 @@ export const auth = betterAuth({
   session: {
     expiresIn: 60 * 60 * 24 * 7,
     updateAge: 60 * 60 * 24,
+    additionalFields: {
+      // Server-owned session assurance. Account-level 2FA enrollment is not sufficient for privileged writes.
+      strongAuthAt: {
+        type: "date",
+        required: false,
+        input: false,
+        returned: true,
+      },
+    },
+  },
+  databaseHooks: {
+    session: {
+      create: {
+        before: async (session, ctx) => {
+          if (!strongAuthSessionPaths.has(ctx?.path ?? "")) {
+            return { data: session };
+          }
+
+          return {
+            data: {
+              ...session,
+              strongAuthAt: new Date(),
+            },
+          };
+        },
+      },
+    },
   },
   emailAndPassword: {
     enabled: true,
