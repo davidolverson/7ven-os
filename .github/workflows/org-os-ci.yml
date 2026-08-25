@@ -41,6 +41,7 @@ jobs:
       NEXT_PUBLIC_APP_URL: http://127.0.0.1:3000
       BETTER_AUTH_URL: http://127.0.0.1:3000
       BETTER_AUTH_SECRET: 0123456789abcdef0123456789abcdef0123456789abcdef
+      PRIVACY_HASH_SECRET: fedcba9876543210fedcba9876543210fedcba9876543210
       AUTH_DATABASE_URL: postgresql://org_auth:auth-ci-password@127.0.0.1:5432/org_os?options=-c%20search_path%3Dauth
       DATABASE_URL: postgresql://org_app:app-ci-password@127.0.0.1:5432/org_os?options=-c%20search_path%3Dapp,public
       ALLOW_PUBLIC_SIGNUP: "false"
