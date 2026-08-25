@@ -31,6 +31,32 @@ export const assignableRoleKeys = [
   "privileged_admin",
 ] as const satisfies readonly Exclude<RoleKey, "break_glass">[];
 
+// Direct technical access administration is deliberately limited to routine operational roles.
+// Sensitive/governance roles must use a governed approval path; break-glass is the only emergency bypass.
+export const directAssignableRoleKeys = [
+  "member",
+  "recruiter",
+  "coach",
+  "creator_manager",
+  "competition_admin",
+] as const satisfies readonly (typeof assignableRoleKeys)[number][];
+
+export const governanceProtectedRoleKeys = [
+  "integrity_officer",
+  "safeguarding_officer",
+  "finance_submitter",
+  "finance_approver",
+  "finance_reconciler",
+  "council",
+  "privileged_admin",
+] as const satisfies readonly (typeof assignableRoleKeys)[number][];
+
+const governanceProtectedRoleSet = new Set<RoleKey>(governanceProtectedRoleKeys);
+
+export function roleRequiresGovernanceApproval(roleKey: RoleKey) {
+  return governanceProtectedRoleSet.has(roleKey);
+}
+
 export const scopeTypes = ["organization", "title", "team", "event", "case", "finance"] as const;
 export type ScopeType = (typeof scopeTypes)[number];
 
