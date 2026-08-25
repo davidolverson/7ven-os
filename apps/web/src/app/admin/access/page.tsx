@@ -24,6 +24,7 @@ interface AssignmentRow extends QueryResultRow {
   scope_id: string | null;
   starts_at: Date;
   ends_at: Date | null;
+  revoked_at: Date | null;
 }
 
 async function getPeople(): Promise<AccessPersonOption[]> {
@@ -40,10 +41,15 @@ async function getPeople(): Promise<AccessPersonOption[]> {
 
 async function getAssignments(): Promise<AccessAssignment[]> {
   const result = await query<AssignmentRow>(
-    `SELECT ra.id, ra.person_id, pp.display_name, ra.role_key, ra.scope_type, ra.scope_id, ra.starts_at, ra.ends_at
+    `SELECT ra.id, ra.person_id, pp.display_name, ra.role_key, ra.scope_type, ra.scope_id,
+            ra.starts_at, ra.ends_at, ra.revoked_at
        FROM app.role_assignment ra
        JOIN app.person_profile pp ON pp.id = ra.person_id
-      ORDER BY (ra.ends_at IS NULL OR ra.ends_at > now()) DESC, ra.created_at DESC
+      ORDER BY (
+        ra.revoked_at IS NULL
+        AND ra.starts_at <= now()
+        AND (ra.ends_at IS NULL OR ra.ends_at > now())
+      ) DESC, ra.created_at DESC
       LIMIT 300`,
   );
 
@@ -56,6 +62,7 @@ async function getAssignments(): Promise<AccessAssignment[]> {
     scopeId: row.scope_id,
     startsAt: row.starts_at.toISOString(),
     endsAt: row.ends_at?.toISOString() ?? null,
+    revokedAt: row.revoked_at?.toISOString() ?? null,
   }));
 }
 
@@ -99,7 +106,7 @@ export default function AccessPage() {
                 <p className="eyebrow">Administration</p>
                 <h1>Scoped Org access</h1>
                 <p className="muted page-lead">
-                  Grant only the minimum role and scope needed. Revocation ends access without erasing history, and break-glass remains outside the normal grant path.
+                  Grant only the minimum role and scope needed. Expiry and revocation remain distinct, historical assignments are retained, and break-glass stays outside the normal grant path.
                 </p>
               </div>
               <span className="badge" data-tone="good">Authorized + 2FA</span>
