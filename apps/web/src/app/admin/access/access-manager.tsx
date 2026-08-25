@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 import { useRouter } from "next/navigation";
-import { assignableRoleKeys, scopeTypes } from "@/lib/authorization-model";
+import { directAssignableRoleKeys, scopeTypes } from "@/lib/authorization-model";
 
 export interface AccessPersonOption {
   id: string;
@@ -123,9 +123,9 @@ export function AccessManager({
       <form className="card stack" onSubmit={assignRole}>
         <div>
           <span className="badge">Protected write</span>
-          <h2>Grant scoped role</h2>
+          <h2>Grant scoped operational role</h2>
           <p className="muted">
-            Break-glass cannot be granted here. Every grant requires an authorized Org role, enrolled two-factor protection, a scope, and an audit reason.
+            This direct surface handles routine operational roles only. Finance, safeguarding, integrity, Council, privileged-admin, and break-glass authority require governed approval or emergency break-glass handling.
           </p>
         </div>
 
@@ -140,7 +140,7 @@ export function AccessManager({
         <div className="field">
           <label htmlFor="access-role">Role</label>
           <select className="input" id="access-role" name="roleKey" required defaultValue="member">
-            {assignableRoleKeys.map((role) => <option key={role} value={role}>{role}</option>)}
+            {directAssignableRoleKeys.map((role) => <option key={role} value={role}>{role}</option>)}
           </select>
         </div>
 
@@ -182,7 +182,7 @@ export function AccessManager({
       <section className="card stack">
         <div>
           <h2>Active and historical assignments</h2>
-          <p className="muted">Revocation sets an end time; it never deletes assignment or audit history.</p>
+          <p className="muted">Revocation sets an end time; it never deletes assignment or audit history. Protected authority cannot be revoked from this technical surface without break-glass.</p>
         </div>
 
         <div className="field">
