@@ -15,7 +15,7 @@ const applicationSchema = z.object({
   goals: z.string().trim().min(20).max(2_000),
   experience: z.string().trim().min(20).max(4_000),
   portfolioUrls: z.array(z.string().url().max(2_048)).max(5).default([]),
-  companyWebsite: z.string().max(0).optional(),
+  companyWebsite: z.string().max(200).optional(),
 });
 
 interface ApplicationRow extends QueryResultRow {
