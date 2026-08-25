@@ -6,12 +6,17 @@ import { authClient } from "@/lib/auth-client";
 
 export function SignInForm() {
   const router = useRouter();
-  const [pending, setPending] = useState(false);
+  const [pending, setPending] = useState<"password" | "passkey" | null>(null);
   const [error, setError] = useState<string | null>(null);
+
+  function completeSignIn() {
+    router.replace("/dashboard");
+    router.refresh();
+  }
 
   async function onSubmit(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    setPending(true);
+    setPending("password");
     setError(null);
 
     const formData = new FormData(event.currentTarget);
@@ -22,12 +27,25 @@ export function SignInForm() {
 
     if (result.error) {
       setError("Sign-in failed. Check your credentials or account status.");
-      setPending(false);
+      setPending(null);
       return;
     }
 
-    router.replace("/dashboard");
-    router.refresh();
+    completeSignIn();
+  }
+
+  async function signInWithPasskey() {
+    setPending("passkey");
+    setError(null);
+
+    const result = await authClient.signIn.passkey();
+    if (result.error) {
+      setError("Passkey sign-in was not completed.");
+      setPending(null);
+      return;
+    }
+
+    completeSignIn();
   }
 
   return (
@@ -46,7 +64,7 @@ export function SignInForm() {
           name="email"
           type="email"
           inputMode="email"
-          autoComplete="email"
+          autoComplete="email webauthn"
           maxLength={254}
           required
         />
@@ -59,7 +77,7 @@ export function SignInForm() {
           id="password"
           name="password"
           type="password"
-          autoComplete="current-password"
+          autoComplete="current-password webauthn"
           minLength={12}
           maxLength={128}
           required
@@ -68,8 +86,11 @@ export function SignInForm() {
 
       {error ? <div className="form-error" role="alert">{error}</div> : null}
 
-      <button className="button button-primary" type="submit" disabled={pending}>
-        {pending ? "Signing in…" : "Sign in"}
+      <button className="button button-primary" type="submit" disabled={pending !== null}>
+        {pending === "password" ? "Signing in…" : "Sign in with password"}
+      </button>
+      <button className="button" type="button" onClick={signInWithPasskey} disabled={pending !== null}>
+        {pending === "passkey" ? "Waiting for passkey…" : "Sign in with passkey"}
       </button>
     </form>
   );
