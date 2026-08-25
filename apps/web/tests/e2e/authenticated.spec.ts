@@ -48,7 +48,7 @@ test("identity admin does not automatically receive Org authority", async ({ pag
   expect(await response.json()).toMatchObject({ error: { code: "ACCESS_DENIED" } });
 });
 
-test("identity admin browser APIs require challenged MFA for reads and writes", async ({ page }) => {
+test("identity admin browser APIs require origin protection and challenged MFA", async ({ page }) => {
   await signIn(page);
 
   const listUsers = await page.request.get("/api/auth/admin/list-users?limit=1");
@@ -60,6 +60,25 @@ test("identity admin browser APIs require challenged MFA for reads and writes", 
       message:
         "A verified two-factor session is required for identity administration. Sign in again and complete the second-factor challenge.",
     },
+  });
+
+  const crossOrigin = await page.request.post("/api/auth/admin/revoke-user-sessions", {
+    headers: { origin: "https://attacker.invalid" },
+    data: { userId: "e2e-target-must-not-be-reached" },
+  });
+  expect(crossOrigin.status()).toBe(403);
+  expect(crossOrigin.headers()["cache-control"]).toContain("no-store");
+  expect(await crossOrigin.json()).toMatchObject({
+    error: { code: "IDENTITY_ORIGIN_NOT_ALLOWED" },
+  });
+
+  const nullOrigin = await page.request.post("/api/auth/admin/revoke-user-sessions", {
+    headers: { origin: "null" },
+    data: { userId: "e2e-target-must-not-be-reached" },
+  });
+  expect(nullOrigin.status()).toBe(403);
+  expect(await nullOrigin.json()).toMatchObject({
+    error: { code: "IDENTITY_ORIGIN_NOT_ALLOWED" },
   });
 
   const revokeSessions = await page.request.post("/api/auth/admin/revoke-user-sessions", {
