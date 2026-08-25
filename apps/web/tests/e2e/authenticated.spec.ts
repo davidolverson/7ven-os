@@ -60,7 +60,8 @@ test("privileged Org role without 2FA cannot perform protected writes", async ({
   expect(await response.json()).toMatchObject({
     error: {
       code: "ACCESS_DENIED",
-      message: "Two-factor authentication is required for this privileged action.",
+      message:
+        "A verified two-factor session is required for this privileged action. Sign in again and complete the second-factor challenge.",
     },
   });
 });
