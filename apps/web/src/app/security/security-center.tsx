@@ -26,63 +26,79 @@ export function SecurityCenter({
 
   async function enableTotp(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    const form = event.currentTarget;
+    const formData = new FormData(form);
+    const password = String(formData.get("password") ?? "");
+
     setPending("enable");
     setError(null);
 
-    const formData = new FormData(event.currentTarget);
-    const password = String(formData.get("password") ?? "");
-    const result = await authClient.twoFactor.enable({ password, method: "totp" });
+    try {
+      const result = await authClient.twoFactor.enable({ password, method: "totp" });
 
-    if (result.error || !result.data) {
-      setError("Two-factor setup could not be started. Check your password and try again.");
+      if (result.error || !result.data) {
+        setError("Two-factor setup could not be started. Check your password and try again.");
+        return;
+      }
+
+      const data = result.data as { method?: string; totpURI?: string; backupCodes?: string[] };
+      if (data.method !== "totp" || !data.totpURI || !data.backupCodes?.length) {
+        setError("The authenticator setup response was incomplete. No security setting was assumed active.");
+        return;
+      }
+
+      form.reset();
+      setSetup({ totpURI: data.totpURI, backupCodes: data.backupCodes });
+    } catch {
+      setError("Two-factor setup could not be completed because the security service did not respond as expected. No privileged session was assumed.");
+    } finally {
       setPending(null);
-      return;
     }
-
-    const data = result.data as { method?: string; totpURI?: string; backupCodes?: string[] };
-    if (data.method !== "totp" || !data.totpURI || !data.backupCodes?.length) {
-      setError("The authenticator setup response was incomplete. No security setting was assumed active.");
-      setPending(null);
-      return;
-    }
-
-    event.currentTarget.reset();
-    setSetup({ totpURI: data.totpURI, backupCodes: data.backupCodes });
-    setPending(null);
   }
 
   async function verifyTotp(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    const formData = new FormData(event.currentTarget);
+    const code = String(formData.get("code") ?? "").trim();
+
     setPending("verify");
     setError(null);
 
-    const formData = new FormData(event.currentTarget);
-    const code = String(formData.get("code") ?? "").trim();
-    const result = await authClient.twoFactor.verifyTotp({ code, trustDevice: false });
+    try {
+      const result = await authClient.twoFactor.verifyTotp({ code, trustDevice: false });
 
-    if (result.error) {
-      setError("That authenticator code was not accepted. Two-factor protection is not treated as enabled yet.");
+      if (result.error) {
+        setError("That authenticator code was not accepted. Two-factor protection is not treated as enabled yet.");
+        return;
+      }
+
+      setVerified(true);
+    } catch {
+      setError("Authenticator verification could not be completed. Two-factor protection is not treated as enabled yet.");
+    } finally {
       setPending(null);
-      return;
     }
-
-    setVerified(true);
-    setPending(null);
   }
 
   async function signOutForVerifiedSession() {
     setPending("signout");
     setError(null);
-    const result = await authClient.signOut();
 
-    if (result.error) {
+    try {
+      const result = await authClient.signOut();
+
+      if (result.error) {
+        setError("Sign-out failed. Your current session was not treated as upgraded.");
+        return;
+      }
+
+      router.replace("/sign-in");
+      router.refresh();
+    } catch {
       setError("Sign-out failed. Your current session was not treated as upgraded.");
+    } finally {
       setPending(null);
-      return;
     }
-
-    router.replace("/sign-in");
-    router.refresh();
   }
 
   if (twoFactorEnabled && !setup) {
