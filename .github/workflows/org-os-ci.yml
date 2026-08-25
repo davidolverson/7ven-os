@@ -52,6 +52,9 @@ jobs:
       E2E_ADMIN_PASSWORD: E2E-Only-Password-2026!
       E2E_PRIVILEGED_EMAIL: e2e-privileged@example.test
       E2E_PRIVILEGED_PASSWORD: E2E-Privileged-Password-2026!
+      E2E_MFA_EMAIL: e2e-mfa@example.test
+      E2E_MFA_PASSWORD: E2E-MFA-Password-2026!
+      E2E_MFA_PERSON_ID: 00000000-0000-4000-8000-000000000010
       E2E_BASE_URL: http://127.0.0.1:3000
 
     steps:
@@ -166,6 +169,17 @@ jobs:
           --role admin
           --yes
 
+      - name: Create isolated MFA E2E identity without identity-admin authority
+        working-directory: apps/web
+        run: >-
+          npx --yes auth@1.7.1 create-admin
+          --config src/lib/auth.ts
+          --email "$E2E_MFA_EMAIL"
+          --password "$E2E_MFA_PASSWORD"
+          --name "E2E MFA Privileged"
+          --role user
+          --yes
+
       - name: Seed Org privilege without 2FA for negative authorization test
         env:
           PGPASSWORD: postgres
@@ -197,6 +211,37 @@ jobs:
              );
           SQL
 
+      - name: Seed isolated MFA Org privilege for positive authorization proof
+        env:
+          PGPASSWORD: postgres
+        run: |
+          psql -h 127.0.0.1 -U postgres -d org_os -v ON_ERROR_STOP=1 -v mfa_email="$E2E_MFA_EMAIL" -v mfa_person_id="$E2E_MFA_PERSON_ID" <<'SQL'
+          INSERT INTO app.person_profile (id, auth_user_id, display_name, membership_status)
+          SELECT :'mfa_person_id'::uuid, id, 'E2E MFA Privileged', 'community'
+            FROM auth."user"
+           WHERE lower(email) = lower(:'mfa_email')
+          ON CONFLICT (auth_user_id) DO UPDATE
+            SET display_name = EXCLUDED.display_name,
+                active = true,
+                updated_at = now();
+
+          INSERT INTO app.role_assignment (person_id, role_key, scope_type, reason)
+          SELECT pp.id, 'privileged_admin', 'organization', 'CI positive MFA test: isolated Org privileged role on a non-admin identity.'
+            FROM app.person_profile pp
+            JOIN auth."user" au ON au.id = pp.auth_user_id
+           WHERE lower(au.email) = lower(:'mfa_email')
+             AND NOT EXISTS (
+               SELECT 1
+                 FROM app.role_assignment ra
+                WHERE ra.person_id = pp.id
+                  AND ra.role_key = 'privileged_admin'
+                  AND ra.scope_type = 'organization'
+                  AND ra.scope_id IS NULL
+                  AND ra.starts_at <= now()
+                  AND (ra.ends_at IS NULL OR ra.ends_at > now())
+             );
+          SQL
+
       - name: Typecheck
         run: npm run typecheck
 
@@ -209,6 +254,16 @@ jobs:
 
       - name: Run adversarial browser matrix
         run: npm run test:e2e
+
+      - name: Verify positive MFA write produced exactly one audit event
+        shell: bash
+        run: |
+          set -euo pipefail
+          count="$(PGPASSWORD=migrator-ci-password psql -h 127.0.0.1 -U org_migrator -d org_os -At -v ON_ERROR_STOP=1 -c "SELECT count(*) FROM app.audit_event WHERE domain = 'authorization' AND action = 'role.granted' AND reason = 'E2E positive strong-auth audit proof.';")"
+          if [ "$count" != "1" ]; then
+            echo "ERROR: expected exactly one positive MFA role.granted audit event, found $count"
+            exit 1
+          fi
 
       - name: Upload Playwright evidence
         if: always()
