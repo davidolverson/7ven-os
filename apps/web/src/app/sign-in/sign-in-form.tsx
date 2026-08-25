@@ -49,7 +49,7 @@ export function SignInForm() {
   }
 
   return (
-    <form className="card stack" onSubmit={onSubmit}>
+    <form className="card stack" method="post" action="/sign-in" onSubmit={onSubmit}>
       <div>
         <p className="eyebrow">Member access</p>
         <h2>Sign in</h2>
