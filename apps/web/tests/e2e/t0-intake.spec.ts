@@ -348,7 +348,7 @@ test.describe("T0 open application intake Red Room", () => {
          FROM app.audit_event
         WHERE domain = 'talent'
           AND action = 'application.submitted'
-          AND target_id = $1::uuid`,
+          AND target_id = $1`,
       [firstBody.applicationId as string],
     );
     expect(Number(audits.rows[0]?.count ?? "0")).toBe(1);
@@ -383,7 +383,7 @@ test.describe("T0 open application intake Red Room", () => {
          FROM app.audit_event
         WHERE domain = 'talent'
           AND action = 'application.submitted'
-          AND target_id = $1::uuid`,
+          AND target_id = $1`,
       [applicationId],
     );
     expect(Number(audits.rows[0]?.count ?? "0")).toBe(1);
