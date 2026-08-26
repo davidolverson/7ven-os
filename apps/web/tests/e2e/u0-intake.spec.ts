@@ -1,11 +1,43 @@
 import { expect, test } from "@playwright/test";
 
 async function expectNoPageOverflow(page: import("@playwright/test").Page) {
-  const dimensions = await page.evaluate(() => ({
-    scrollWidth: document.documentElement.scrollWidth,
-    clientWidth: document.documentElement.clientWidth,
-  }));
-  expect(dimensions.scrollWidth).toBeLessThanOrEqual(dimensions.clientWidth + 1);
+  const dimensions = await page.evaluate(() => {
+    const clientWidth = document.documentElement.clientWidth;
+    const offenders = Array.from(document.querySelectorAll<HTMLElement>("body *"))
+      .map((element) => {
+        const rect = element.getBoundingClientRect();
+        const style = getComputedStyle(element);
+        return {
+          tag: element.tagName.toLowerCase(),
+          id: element.id,
+          className: typeof element.className === "string" ? element.className : "",
+          text: (element.textContent ?? "").trim().slice(0, 120),
+          left: Math.round(rect.left * 10) / 10,
+          right: Math.round(rect.right * 10) / 10,
+          width: Math.round(rect.width * 10) / 10,
+          minWidth: style.minWidth,
+          widthStyle: style.width,
+          whiteSpace: style.whiteSpace,
+          overflowWrap: style.overflowWrap,
+          wordBreak: style.wordBreak,
+        };
+      })
+      .filter((entry) => entry.right > clientWidth + 1 || entry.left < -1)
+      .sort((a, b) => b.right - a.right)
+      .slice(0, 12);
+
+    return {
+      scrollWidth: document.documentElement.scrollWidth,
+      clientWidth,
+      bodyScrollWidth: document.body.scrollWidth,
+      offenders,
+    };
+  });
+
+  expect(
+    dimensions.scrollWidth,
+    `Page overflow diagnostics: ${JSON.stringify(dimensions)}`,
+  ).toBeLessThanOrEqual(dimensions.clientWidth + 1);
 }
 
 const invalidFields = [
