@@ -14,9 +14,9 @@ jobs:
     timeout-minutes: 10
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: Setup Node
-        uses: actions/setup-node@v7
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
           node-version: 24.19.0
           package-manager-cache: false
@@ -24,7 +24,18 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          npm install --workspace apps/web --save-dev --package-lock-only --ignore-scripts --no-audit --no-fund auth@1.7.1
+          npm install --workspace apps/web --save-dev --save-exact --package-lock-only --ignore-scripts --no-audit --no-fund auth@1.7.1
+          node -e "const p=require('./apps/web/package.json'); if (p.devDependencies?.auth !== '1.7.1') throw new Error('auth CLI dependency is not exact 1.7.1')"
+          node -e "const l=require('./package-lock.json'); const p=l.packages?.['node_modules/auth']; if (!p || p.version !== '1.7.1' || !p.integrity) throw new Error('auth CLI lock entry missing exact version/integrity')"
           echo 'F0_LOCK_DIFF_BEGIN'
           git diff -- apps/web/package.json package-lock.json
           echo 'F0_LOCK_DIFF_END'
+      - name: Upload exact npm-generated dependency files
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: f0-auth-cli-lock-${{ github.run_id }}
+          path: |
+            apps/web/package.json
+            package-lock.json
+          if-no-files-found: error
+          retention-days: 3
