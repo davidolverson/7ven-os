@@ -1,0 +1,249 @@
+name: A4 Offboarding Security
+
+on:
+  push:
+    branches:
+      - org-os-production-foundation
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: a4-offboarding-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  offboarding-red-room:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: org_os
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd="pg_isready -U postgres -d org_os"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=5
+
+    env:
+      NODE_ENV: test
+      APP_ENV: staging
+      NEXT_TELEMETRY_DISABLED: "1"
+      NEXT_PUBLIC_APP_URL: http://127.0.0.1:3000
+      BETTER_AUTH_URL: http://127.0.0.1:3000
+      BETTER_AUTH_SECRET: 0123456789abcdef0123456789abcdef0123456789abcdef
+      PRIVACY_HASH_SECRET: fedcba9876543210fedcba9876543210fedcba9876543210
+      AUTH_DATABASE_URL: postgresql://org_auth:auth-ci-password@127.0.0.1:5432/org_os?options=-c%20search_path%3Dauth
+      DATABASE_URL: postgresql://org_app:app-ci-password@127.0.0.1:5432/org_os?options=-c%20search_path%3Dapp,public
+      ALLOW_PUBLIC_SIGNUP: "false"
+      APPLICATION_INTAKE_ENABLED: "false"
+      BREAK_GLASS_PRINCIPAL: ""
+      E2E_BASE_URL: http://127.0.0.1:3000
+      E2E_OFFBOARD_ADMIN_EMAIL: e2e-offboard-admin@example.test
+      E2E_OFFBOARD_ADMIN_PASSWORD: E2E-Offboard-Admin-2026!
+      E2E_OFFBOARD_ADMIN_PERSON_ID: 00000000-0000-4000-8000-000000000019
+      E2E_OFFBOARD_TARGET_EMAIL: e2e-offboard-target@example.test
+      E2E_OFFBOARD_TARGET_PASSWORD: E2E-Offboard-Target-2026!
+      E2E_OFFBOARD_TARGET_PERSON_ID: 00000000-0000-4000-8000-000000000020
+      E2E_OFFBOARD_PHANTOM_PERSON_ID: 00000000-0000-4000-8000-000000000021
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup Node
+        uses: actions/setup-node@v7
+        with:
+          node-version: 24.19.0
+          package-manager-cache: false
+
+      - name: Install locked dependencies
+        run: npm ci --include=dev --no-fund --no-audit
+
+      - name: Prepare PostgreSQL roles and schemas
+        env:
+          PGPASSWORD: postgres
+        run: |
+          psql -h 127.0.0.1 -U postgres -d org_os -v ON_ERROR_STOP=1 <<'SQL'
+          DO $$ BEGIN
+            IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'org_auth') THEN
+              CREATE ROLE org_auth LOGIN PASSWORD 'auth-ci-password';
+            END IF;
+            IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'org_migrator') THEN
+              CREATE ROLE org_migrator LOGIN PASSWORD 'migrator-ci-password';
+            END IF;
+            IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'org_app') THEN
+              CREATE ROLE org_app LOGIN PASSWORD 'app-ci-password';
+            END IF;
+          END $$;
+          GRANT CONNECT ON DATABASE org_os TO org_auth, org_migrator, org_app;
+          GRANT CREATE ON DATABASE org_os TO org_migrator;
+          CREATE SCHEMA IF NOT EXISTS auth AUTHORIZATION org_auth;
+          CREATE SCHEMA IF NOT EXISTS app AUTHORIZATION org_migrator;
+          REVOKE CREATE ON SCHEMA app FROM PUBLIC;
+          GRANT USAGE ON SCHEMA app TO org_app;
+          SQL
+
+      - name: Migrate Better Auth schema
+        working-directory: apps/web
+        run: npx --yes auth@1.7.1 migrate --config src/lib/auth.ts --yes
+
+      - name: Apply Org application migrations
+        env:
+          PGPASSWORD: migrator-ci-password
+        run: |
+          for file in infra/db/migrations/*.sql; do
+            echo "Applying $file"
+            psql -h 127.0.0.1 -U org_migrator -d org_os -v ON_ERROR_STOP=1 -f "$file"
+          done
+
+      - name: Grant runtime application privileges
+        env:
+          PGPASSWORD: migrator-ci-password
+        run: |
+          psql -h 127.0.0.1 -U org_migrator -d org_os -v ON_ERROR_STOP=1 <<'SQL'
+          GRANT USAGE ON SCHEMA app TO org_app;
+          GRANT SELECT, INSERT, UPDATE ON ALL TABLES IN SCHEMA app TO org_app;
+          GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA app TO org_app;
+          SQL
+
+      - name: Create dual-authority offboarding operator
+        working-directory: apps/web
+        run: >-
+          npx --yes auth@1.7.1 create-admin
+          --config src/lib/auth.ts
+          --email "$E2E_OFFBOARD_ADMIN_EMAIL"
+          --password "$E2E_OFFBOARD_ADMIN_PASSWORD"
+          --name "E2E Offboarding Admin"
+          --role admin
+          --yes
+
+      - name: Create offboarding target identity
+        working-directory: apps/web
+        run: >-
+          npx --yes auth@1.7.1 create-admin
+          --config src/lib/auth.ts
+          --email "$E2E_OFFBOARD_TARGET_EMAIL"
+          --password "$E2E_OFFBOARD_TARGET_PASSWORD"
+          --name "E2E Offboarding Target"
+          --role user
+          --yes
+
+      - name: Seed Org offboarding fixtures
+        env:
+          PGPASSWORD: postgres
+        run: |
+          psql -h 127.0.0.1 -U postgres -d org_os -v ON_ERROR_STOP=1 \
+            -v admin_email="$E2E_OFFBOARD_ADMIN_EMAIL" \
+            -v admin_person_id="$E2E_OFFBOARD_ADMIN_PERSON_ID" \
+            -v target_email="$E2E_OFFBOARD_TARGET_EMAIL" \
+            -v target_person_id="$E2E_OFFBOARD_TARGET_PERSON_ID" \
+            -v phantom_person_id="$E2E_OFFBOARD_PHANTOM_PERSON_ID" <<'SQL'
+          INSERT INTO app.person_profile (id, auth_user_id, display_name, membership_status)
+          SELECT :'admin_person_id'::uuid, id, 'E2E Offboarding Admin', 'member'
+            FROM auth."user"
+           WHERE lower(email) = lower(:'admin_email');
+
+          INSERT INTO app.role_assignment (person_id, role_key, scope_type, reason)
+          VALUES (:'admin_person_id'::uuid, 'privileged_admin', 'organization', 'CI A4 dual-domain operator fixture.');
+
+          INSERT INTO app.person_profile (id, auth_user_id, display_name, membership_status)
+          SELECT :'target_person_id'::uuid, id, 'E2E Offboarding Target', 'member'
+            FROM auth."user"
+           WHERE lower(email) = lower(:'target_email');
+
+          INSERT INTO app.role_assignment (person_id, role_key, scope_type, reason)
+          VALUES (:'target_person_id'::uuid, 'member', 'organization', 'CI A4 target active Org access fixture.');
+
+          INSERT INTO app.person_profile (id, auth_user_id, display_name, membership_status)
+          VALUES (:'phantom_person_id'::uuid, 'missing-e2e-offboarding-auth-user', 'E2E Missing Identity Target', 'member');
+
+          INSERT INTO app.role_assignment (person_id, role_key, scope_type, reason)
+          VALUES (:'phantom_person_id'::uuid, 'member', 'organization', 'CI A4 partial-failure target active Org access fixture.');
+          SQL
+
+      - name: Typecheck offboarding implementation
+        run: npm run typecheck
+
+      - name: Build production app
+        run: npm run build
+
+      - name: Install Chromium
+        working-directory: apps/web
+        run: npx playwright install --with-deps chromium
+
+      - name: Run A4 offboarding Red Room
+        working-directory: apps/web
+        run: npx playwright test tests/e2e/offboarding.spec.ts --project=desktop-chrome
+
+      - name: Verify successful offboarding persistence and identity disablement
+        env:
+          PGPASSWORD: postgres
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          profile_state="$(psql -h 127.0.0.1 -U postgres -d org_os -At -v ON_ERROR_STOP=1 -c "SELECT active::text || ':' || membership_status FROM app.person_profile WHERE id = '$E2E_OFFBOARD_TARGET_PERSON_ID'::uuid;")"
+          test "$profile_state" = "false:inactive"
+
+          active_roles="$(psql -h 127.0.0.1 -U postgres -d org_os -At -v ON_ERROR_STOP=1 -c "SELECT count(*) FROM app.role_assignment WHERE person_id = '$E2E_OFFBOARD_TARGET_PERSON_ID'::uuid AND revoked_at IS NULL AND starts_at <= now() AND (ends_at IS NULL OR ends_at > now());")"
+          test "$active_roles" = "0"
+
+          execution_state="$(psql -h 127.0.0.1 -U postgres -d org_os -At -v ON_ERROR_STOP=1 -c "SELECT state || ':' || attempt_count::text || ':' || COALESCE(identity_error_code, '') FROM app.offboarding_execution WHERE person_id = '$E2E_OFFBOARD_TARGET_PERSON_ID'::uuid AND decision_ref = 'E2E-OFFBOARD-SUCCESS';")"
+          test "$execution_state" = "complete:1:"
+
+          auth_state="$(psql -h 127.0.0.1 -U postgres -d org_os -At -v ON_ERROR_STOP=1 -c "SELECT banned::text || ':' || role FROM auth.\"user\" WHERE lower(email) = lower('$E2E_OFFBOARD_TARGET_EMAIL');")"
+          test "$auth_state" = "true:user"
+
+          auth_user_id="$(psql -h 127.0.0.1 -U postgres -d org_os -At -v ON_ERROR_STOP=1 -c "SELECT id FROM auth.\"user\" WHERE lower(email) = lower('$E2E_OFFBOARD_TARGET_EMAIL');")"
+          remaining_sessions="$(psql -h 127.0.0.1 -U postgres -d org_os -At -v ON_ERROR_STOP=1 -c "SELECT count(*) FROM auth.\"session\" WHERE \"userId\" = '$auth_user_id';")"
+          test "$remaining_sessions" = "0"
+
+          org_audit="$(psql -h 127.0.0.1 -U postgres -d org_os -At -v ON_ERROR_STOP=1 -c "SELECT count(*) FROM app.audit_event WHERE action = 'organizational_access.offboarded' AND target_id = '$E2E_OFFBOARD_TARGET_PERSON_ID'::uuid;")"
+          identity_audit="$(psql -h 127.0.0.1 -U postgres -d org_os -At -v ON_ERROR_STOP=1 -c "SELECT count(*) FROM app.audit_event WHERE action = 'identity_access.revoked' AND target_id = '$E2E_OFFBOARD_TARGET_PERSON_ID'::uuid;")"
+          test "$org_audit" = "1"
+          test "$identity_audit" = "1"
+
+      - name: Verify partial identity failure remained fail-closed and retryable
+        env:
+          PGPASSWORD: postgres
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          profile_state="$(psql -h 127.0.0.1 -U postgres -d org_os -At -v ON_ERROR_STOP=1 -c "SELECT active::text || ':' || membership_status FROM app.person_profile WHERE id = '$E2E_OFFBOARD_PHANTOM_PERSON_ID'::uuid;")"
+          test "$profile_state" = "false:inactive"
+
+          active_roles="$(psql -h 127.0.0.1 -U postgres -d org_os -At -v ON_ERROR_STOP=1 -c "SELECT count(*) FROM app.role_assignment WHERE person_id = '$E2E_OFFBOARD_PHANTOM_PERSON_ID'::uuid AND revoked_at IS NULL AND starts_at <= now() AND (ends_at IS NULL OR ends_at > now());")"
+          test "$active_roles" = "0"
+
+          execution_state="$(psql -h 127.0.0.1 -U postgres -d org_os -At -v ON_ERROR_STOP=1 -c "SELECT state || ':' || attempt_count::text || ':' || CASE WHEN identity_error_code IS NULL THEN 'missing' ELSE 'recorded' END FROM app.offboarding_execution WHERE person_id = '$E2E_OFFBOARD_PHANTOM_PERSON_ID'::uuid AND decision_ref = 'E2E-OFFBOARD-PARTIAL';")"
+          test "$execution_state" = "identity_failed:2:recorded"
+
+          org_audit="$(psql -h 127.0.0.1 -U postgres -d org_os -At -v ON_ERROR_STOP=1 -c "SELECT count(*) FROM app.audit_event WHERE action = 'organizational_access.offboarded' AND target_id = '$E2E_OFFBOARD_PHANTOM_PERSON_ID'::uuid;")"
+          failure_audit="$(psql -h 127.0.0.1 -U postgres -d org_os -At -v ON_ERROR_STOP=1 -c "SELECT count(*) FROM app.audit_event WHERE action = 'identity_access.revocation_failed' AND target_id = '$E2E_OFFBOARD_PHANTOM_PERSON_ID'::uuid;")"
+          success_audit="$(psql -h 127.0.0.1 -U postgres -d org_os -At -v ON_ERROR_STOP=1 -c "SELECT count(*) FROM app.audit_event WHERE action = 'identity_access.revoked' AND target_id = '$E2E_OFFBOARD_PHANTOM_PERSON_ID'::uuid;")"
+          test "$org_audit" = "1"
+          test "$failure_audit" = "2"
+          test "$success_audit" = "0"
+
+      - name: Upload A4 Playwright evidence
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: a4-offboarding-${{ github.run_id }}
+          path: |
+            apps/web/playwright-report
+            apps/web/test-results
+          if-no-files-found: ignore
+          retention-days: 14
