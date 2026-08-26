@@ -1,0 +1,84 @@
+name: F0 Hardening Apply
+
+on:
+  push:
+    branches:
+      - org-os-production-foundation
+
+permissions:
+  contents: write
+
+jobs:
+  apply-reviewed-f0-hardening:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Setup Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: 24.19.0
+          package-manager-cache: false
+      - name: Apply installed-only CLI and immutable Action refs
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          package_path = Path('apps/web/package.json')
+          package = json.loads(package_path.read_text())
+          scripts = package.setdefault('scripts', {})
+          scripts['auth:cli'] = 'auth'
+          package_path.write_text(json.dumps(package, indent=2) + '\n')
+
+          replacements = {
+              'actions/checkout@v7': 'actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7',
+              'actions/setup-node@v7': 'actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7',
+              'actions/upload-artifact@v6': 'actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6',
+              'npx --yes auth@1.7.1 migrate': 'npm run auth:cli -- migrate',
+              'npx --yes auth@1.7.1 create-admin': 'npm run auth:cli -- create-admin',
+          }
+          for workflow_name in ('org-os-ci.yml', 'offboarding-security.yml', 'governance-security.yml'):
+              path = Path('.github/workflows') / workflow_name
+              text = path.read_text()
+              for old, new in replacements.items():
+                  text = text.replace(old, new)
+              path.write_text(text)
+          PY
+
+          node -e "const p=require('./apps/web/package.json'); if (p.scripts?.['auth:cli'] !== 'auth') throw new Error('local auth CLI script missing')"
+          if git grep -n -E 'npx[[:space:]]+--yes[[:space:]]+auth@|auth@latest' -- .github/workflows; then
+            echo 'ERROR: remote Better Auth executable resolution remains'
+            exit 1
+          fi
+          python - <<'PY'
+          import re
+          from pathlib import Path
+          bad=[]
+          for path in Path('.github/workflows').glob('*.yml'):
+              for n,line in enumerate(path.read_text().splitlines(),1):
+                  m=re.search(r'\buses:\s*([^\s#]+)', line)
+                  if not m:
+                      continue
+                  ref=m.group(1)
+                  if ref.startswith('./'):
+                      continue
+                  if '@' not in ref or not re.fullmatch(r'[0-9a-f]{40}', ref.rsplit('@',1)[1]):
+                      bad.append(f'{path}:{n}:{ref}')
+          if bad:
+              raise SystemExit('Mutable or malformed workflow action refs remain:\n'+'\n'.join(bad))
+          PY
+      - name: Commit hardening and remove temporary writer
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm .github/workflows/f0-hardening-apply.yml
+          git config user.name "F0 Hardening Apply"
+          git config user.email "actions@users.noreply.github.com"
+          git add apps/web/package.json .github/workflows/org-os-ci.yml .github/workflows/offboarding-security.yml .github/workflows/governance-security.yml .github/workflows/f0-hardening-apply.yml
+          git diff --cached --check
+          git commit -m "ci: enforce installed-only immutable execution"
+          git push origin HEAD:org-os-production-foundation
