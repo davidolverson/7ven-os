@@ -56,6 +56,7 @@ jobs:
       E2E_OFFBOARD_TARGET_PASSWORD: E2E-Offboard-Target-2026!
       E2E_OFFBOARD_TARGET_PERSON_ID: 00000000-0000-4000-8000-000000000020
       E2E_OFFBOARD_PHANTOM_PERSON_ID: 00000000-0000-4000-8000-000000000021
+      E2E_OFFBOARD_TEAM_ID: 00000000-0000-4000-8000-000000000030
 
     steps:
       - name: Checkout
@@ -148,7 +149,8 @@ jobs:
             -v admin_person_id="$E2E_OFFBOARD_ADMIN_PERSON_ID" \
             -v target_email="$E2E_OFFBOARD_TARGET_EMAIL" \
             -v target_person_id="$E2E_OFFBOARD_TARGET_PERSON_ID" \
-            -v phantom_person_id="$E2E_OFFBOARD_PHANTOM_PERSON_ID" <<'SQL'
+            -v phantom_person_id="$E2E_OFFBOARD_PHANTOM_PERSON_ID" \
+            -v team_id="$E2E_OFFBOARD_TEAM_ID" <<'SQL'
           INSERT INTO app.person_profile (id, auth_user_id, display_name, membership_status)
           SELECT :'admin_person_id'::uuid, id, 'E2E Offboarding Admin', 'member'
             FROM auth."user"
@@ -170,6 +172,19 @@ jobs:
 
           INSERT INTO app.role_assignment (person_id, role_key, scope_type, reason)
           VALUES (:'phantom_person_id'::uuid, 'member', 'organization', 'CI A4 partial-failure target active Org access fixture.');
+
+          INSERT INTO app.team (id, name, game_title, division, state)
+          VALUES (:'team_id'::uuid, 'E2E Offboarding Team', 'NBA 2K27', 'a4-proof', 'active');
+
+          INSERT INTO app.roster_membership (team_id, person_id, roster_role, roster_state)
+          VALUES
+            (:'team_id'::uuid, :'target_person_id'::uuid, 'player', 'active'),
+            (:'team_id'::uuid, :'phantom_person_id'::uuid, 'player', 'active');
+
+          INSERT INTO app.external_identity (person_id, provider, external_user_id, public_handle, verified_at)
+          VALUES
+            (:'target_person_id'::uuid, 'discord', 'e2e-offboard-target-discord', 'target#0001', now()),
+            (:'phantom_person_id'::uuid, 'discord', 'e2e-offboard-phantom-discord', 'phantom#0001', now());
           SQL
 
       - name: Typecheck offboarding implementation
@@ -199,8 +214,17 @@ jobs:
           active_roles="$(psql -h 127.0.0.1 -U postgres -d org_os -At -v ON_ERROR_STOP=1 -c "SELECT count(*) FROM app.role_assignment WHERE person_id = '$E2E_OFFBOARD_TARGET_PERSON_ID'::uuid AND revoked_at IS NULL AND starts_at <= now() AND (ends_at IS NULL OR ends_at > now());")"
           test "$active_roles" = "0"
 
-          execution_state="$(psql -h 127.0.0.1 -U postgres -d org_os -At -v ON_ERROR_STOP=1 -c "SELECT state || ':' || attempt_count::text || ':' || COALESCE(identity_error_code, '') FROM app.offboarding_execution WHERE person_id = '$E2E_OFFBOARD_TARGET_PERSON_ID'::uuid AND decision_ref = 'E2E-OFFBOARD-SUCCESS';")"
-          test "$execution_state" = "complete:1:"
+          roster_state="$(psql -h 127.0.0.1 -U postgres -d org_os -At -v ON_ERROR_STOP=1 -c "SELECT roster_state || ':' || CASE WHEN ended_at IS NULL THEN 'open' ELSE 'ended' END FROM app.roster_membership WHERE person_id = '$E2E_OFFBOARD_TARGET_PERSON_ID'::uuid;")"
+          test "$roster_state" = "inactive:ended"
+
+          disconnected="$(psql -h 127.0.0.1 -U postgres -d org_os -At -v ON_ERROR_STOP=1 -c "SELECT count(*) FROM app.external_identity WHERE person_id = '$E2E_OFFBOARD_TARGET_PERSON_ID'::uuid AND disconnected_at IS NOT NULL;")"
+          test "$disconnected" = "1"
+
+          projection_count="$(psql -h 127.0.0.1 -U postgres -d org_os -At -v ON_ERROR_STOP=1 -c "SELECT count(*) FROM app.projection_job pj JOIN app.external_identity ei ON ei.id = pj.entity_id WHERE ei.person_id = '$E2E_OFFBOARD_TARGET_PERSON_ID'::uuid AND pj.provider = 'discord' AND pj.entity_type = 'external_identity' AND pj.status = 'pending' AND pj.desired_state->>'connected' = 'false';")"
+          test "$projection_count" = "1"
+
+          execution_state="$(psql -h 127.0.0.1 -U postgres -d org_os -At -v ON_ERROR_STOP=1 -c "SELECT state || ':' || attempt_count::text || ':' || COALESCE(identity_error_code, '') || ':' || CASE WHEN identity_attempt_token IS NULL THEN 'clear' ELSE 'set' END FROM app.offboarding_execution WHERE person_id = '$E2E_OFFBOARD_TARGET_PERSON_ID'::uuid AND decision_ref = 'E2E-OFFBOARD-SUCCESS';")"
+          test "$execution_state" = "complete:1::clear"
 
           auth_state="$(psql -h 127.0.0.1 -U postgres -d org_os -At -v ON_ERROR_STOP=1 -c "SELECT banned::text || ':' || role FROM auth.\"user\" WHERE lower(email) = lower('$E2E_OFFBOARD_TARGET_EMAIL');")"
           test "$auth_state" = "true:user"
@@ -227,8 +251,17 @@ jobs:
           active_roles="$(psql -h 127.0.0.1 -U postgres -d org_os -At -v ON_ERROR_STOP=1 -c "SELECT count(*) FROM app.role_assignment WHERE person_id = '$E2E_OFFBOARD_PHANTOM_PERSON_ID'::uuid AND revoked_at IS NULL AND starts_at <= now() AND (ends_at IS NULL OR ends_at > now());")"
           test "$active_roles" = "0"
 
-          execution_state="$(psql -h 127.0.0.1 -U postgres -d org_os -At -v ON_ERROR_STOP=1 -c "SELECT state || ':' || attempt_count::text || ':' || CASE WHEN identity_error_code IS NULL THEN 'missing' ELSE 'recorded' END FROM app.offboarding_execution WHERE person_id = '$E2E_OFFBOARD_PHANTOM_PERSON_ID'::uuid AND decision_ref = 'E2E-OFFBOARD-PARTIAL';")"
-          test "$execution_state" = "identity_failed:2:recorded"
+          roster_state="$(psql -h 127.0.0.1 -U postgres -d org_os -At -v ON_ERROR_STOP=1 -c "SELECT roster_state || ':' || CASE WHEN ended_at IS NULL THEN 'open' ELSE 'ended' END FROM app.roster_membership WHERE person_id = '$E2E_OFFBOARD_PHANTOM_PERSON_ID'::uuid;")"
+          test "$roster_state" = "inactive:ended"
+
+          disconnected="$(psql -h 127.0.0.1 -U postgres -d org_os -At -v ON_ERROR_STOP=1 -c "SELECT count(*) FROM app.external_identity WHERE person_id = '$E2E_OFFBOARD_PHANTOM_PERSON_ID'::uuid AND disconnected_at IS NOT NULL;")"
+          test "$disconnected" = "1"
+
+          projection_count="$(psql -h 127.0.0.1 -U postgres -d org_os -At -v ON_ERROR_STOP=1 -c "SELECT count(*) FROM app.projection_job pj JOIN app.external_identity ei ON ei.id = pj.entity_id WHERE ei.person_id = '$E2E_OFFBOARD_PHANTOM_PERSON_ID'::uuid AND pj.provider = 'discord' AND pj.entity_type = 'external_identity' AND pj.status = 'pending' AND pj.desired_state->>'connected' = 'false';")"
+          test "$projection_count" = "1"
+
+          execution_state="$(psql -h 127.0.0.1 -U postgres -d org_os -At -v ON_ERROR_STOP=1 -c "SELECT state || ':' || attempt_count::text || ':' || CASE WHEN identity_error_code IS NULL THEN 'missing' ELSE 'recorded' END || ':' || CASE WHEN identity_attempt_token IS NULL THEN 'clear' ELSE 'set' END FROM app.offboarding_execution WHERE person_id = '$E2E_OFFBOARD_PHANTOM_PERSON_ID'::uuid AND decision_ref = 'E2E-OFFBOARD-PARTIAL';")"
+          test "$execution_state" = "identity_failed:2:recorded:clear"
 
           org_audit="$(psql -h 127.0.0.1 -U postgres -d org_os -At -v ON_ERROR_STOP=1 -c "SELECT count(*) FROM app.audit_event WHERE action = 'organizational_access.offboarded' AND target_id = '$E2E_OFFBOARD_PHANTOM_PERSON_ID'::uuid;")"
           failure_audit="$(psql -h 127.0.0.1 -U postgres -d org_os -At -v ON_ERROR_STOP=1 -c "SELECT count(*) FROM app.audit_event WHERE action = 'identity_access.revocation_failed' AND target_id = '$E2E_OFFBOARD_PHANTOM_PERSON_ID'::uuid;")"
