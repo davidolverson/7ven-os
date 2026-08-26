@@ -134,6 +134,7 @@ jobs:
         run: >-
           npm run playwright:cli -- test tests/e2e/t0-intake.spec.ts
           --project=desktop-chrome
+          --retries=0
 
       - name: Verify T0 database evidence independently
         env:
@@ -158,8 +159,8 @@ jobs:
           assert_count 1 "SELECT count(*) FROM app.application WHERE email = 't0-concurrent-replay@example.test';"
           assert_count 3 "SELECT count(*) FROM app.application WHERE email = 't0-rate-limit@example.test';"
           assert_count 0 "SELECT count(*) FROM app.application WHERE email = 't0-rollback@example.test';"
-          assert_count 1 "SELECT count(*) FROM app.application a JOIN app.audit_event e ON e.target_id = a.id WHERE a.email = 't0-sequential-replay@example.test' AND e.domain = 'talent' AND e.action = 'application.submitted';"
-          assert_count 1 "SELECT count(*) FROM app.application a JOIN app.audit_event e ON e.target_id = a.id WHERE a.email = 't0-concurrent-replay@example.test' AND e.domain = 'talent' AND e.action = 'application.submitted';"
+          assert_count 1 "SELECT count(*) FROM app.application a JOIN app.audit_event e ON e.target_id = a.id::text WHERE a.email = 't0-sequential-replay@example.test' AND e.domain = 'talent' AND e.action = 'application.submitted';"
+          assert_count 1 "SELECT count(*) FROM app.application a JOIN app.audit_event e ON e.target_id = a.id::text WHERE a.email = 't0-concurrent-replay@example.test' AND e.domain = 'talent' AND e.action = 'application.submitted';"
           assert_count 0 "SELECT count(*) FROM app.rate_limit_bucket WHERE key_hash !~ '^[0-9a-f]{64}$';"
 
       - name: Upload T0 Playwright evidence
