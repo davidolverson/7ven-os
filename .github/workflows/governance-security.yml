@@ -1,0 +1,295 @@
+name: A0 Protected Role Governance
+
+on:
+  push:
+    branches:
+      - org-os-production-foundation
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: a0-governance-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  protected-role-governance-red-room:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: org_os
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd="pg_isready -U postgres -d org_os"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=5
+
+    env:
+      NODE_ENV: test
+      APP_ENV: staging
+      NEXT_TELEMETRY_DISABLED: "1"
+      NEXT_PUBLIC_APP_URL: http://127.0.0.1:3000
+      BETTER_AUTH_URL: http://127.0.0.1:3000
+      BETTER_AUTH_SECRET: 0123456789abcdef0123456789abcdef0123456789abcdef
+      PRIVACY_HASH_SECRET: fedcba9876543210fedcba9876543210fedcba9876543210
+      AUTH_DATABASE_URL: postgresql://org_auth:auth-ci-password@127.0.0.1:5432/org_os?options=-c%20search_path%3Dauth
+      DATABASE_URL: postgresql://org_app:app-ci-password@127.0.0.1:5432/org_os?options=-c%20search_path%3Dapp,public
+      ALLOW_PUBLIC_SIGNUP: "false"
+      APPLICATION_INTAKE_ENABLED: "false"
+      BREAK_GLASS_PRINCIPAL: ""
+      E2E_BASE_URL: http://127.0.0.1:3000
+      E2E_GOV_REQUESTER_EMAIL: e2e-gov-requester@example.test
+      E2E_GOV_REQUESTER_PASSWORD: E2E-Gov-Requester-2026!
+      E2E_GOV_REQUESTER_PERSON_ID: 00000000-0000-4000-8000-000000000040
+      E2E_GOV_COUNCIL_EMAIL: e2e-gov-council@example.test
+      E2E_GOV_COUNCIL_PASSWORD: E2E-Gov-Council-2026!
+      E2E_GOV_COUNCIL_PERSON_ID: 00000000-0000-4000-8000-000000000041
+      E2E_GOV_SELF_REVIEWER_EMAIL: e2e-gov-self-reviewer@example.test
+      E2E_GOV_SELF_REVIEWER_PASSWORD: E2E-Gov-Self-Reviewer-2026!
+      E2E_GOV_SELF_REVIEWER_PERSON_ID: 00000000-0000-4000-8000-000000000042
+      E2E_GOV_BREAKER_EMAIL: e2e-gov-breaker@example.test
+      E2E_GOV_BREAKER_PASSWORD: E2E-Gov-Breaker-2026!
+      E2E_GOV_BREAKER_PERSON_ID: 00000000-0000-4000-8000-000000000043
+      E2E_GOV_SCOPED_COUNCIL_EMAIL: e2e-gov-scoped-council@example.test
+      E2E_GOV_SCOPED_COUNCIL_PASSWORD: E2E-Gov-Scoped-Council-2026!
+      E2E_GOV_SCOPED_COUNCIL_PERSON_ID: 00000000-0000-4000-8000-000000000044
+      E2E_GOV_TARGET_PERSON_ID: 00000000-0000-4000-8000-000000000045
+      E2E_GOV_TEAM_A_ID: 00000000-0000-4000-8000-000000000050
+      E2E_GOV_TEAM_B_ID: 00000000-0000-4000-8000-000000000051
+      E2E_GOV_REVOKE_ASSIGNMENT_ID: 00000000-0000-4000-8000-000000000060
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup Node
+        uses: actions/setup-node@v7
+        with:
+          node-version: 24.19.0
+          package-manager-cache: false
+
+      - name: Install locked dependencies
+        run: npm ci --include=dev --no-fund --no-audit
+
+      - name: Prepare PostgreSQL roles and schemas
+        env:
+          PGPASSWORD: postgres
+        run: |
+          psql -h 127.0.0.1 -U postgres -d org_os -v ON_ERROR_STOP=1 <<'SQL'
+          DO $$ BEGIN
+            IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'org_auth') THEN
+              CREATE ROLE org_auth LOGIN PASSWORD 'auth-ci-password';
+            END IF;
+            IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'org_migrator') THEN
+              CREATE ROLE org_migrator LOGIN PASSWORD 'migrator-ci-password';
+            END IF;
+            IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'org_app') THEN
+              CREATE ROLE org_app LOGIN PASSWORD 'app-ci-password';
+            END IF;
+          END $$;
+          GRANT CONNECT ON DATABASE org_os TO org_auth, org_migrator, org_app;
+          GRANT CREATE ON DATABASE org_os TO org_migrator;
+          CREATE SCHEMA IF NOT EXISTS auth AUTHORIZATION org_auth;
+          CREATE SCHEMA IF NOT EXISTS app AUTHORIZATION org_migrator;
+          REVOKE CREATE ON SCHEMA app FROM PUBLIC;
+          GRANT USAGE ON SCHEMA app TO org_app;
+          SQL
+
+      - name: Migrate Better Auth schema
+        working-directory: apps/web
+        run: npx --yes auth@1.7.1 migrate --config src/lib/auth.ts --yes
+
+      - name: Apply Org application migrations
+        env:
+          PGPASSWORD: migrator-ci-password
+        run: |
+          for file in infra/db/migrations/*.sql; do
+            echo "Applying $file"
+            psql -h 127.0.0.1 -U org_migrator -d org_os -v ON_ERROR_STOP=1 -f "$file"
+          done
+
+      - name: Grant runtime application privileges
+        env:
+          PGPASSWORD: migrator-ci-password
+        run: |
+          psql -h 127.0.0.1 -U org_migrator -d org_os -v ON_ERROR_STOP=1 <<'SQL'
+          GRANT USAGE ON SCHEMA app TO org_app;
+          GRANT SELECT, INSERT, UPDATE ON ALL TABLES IN SCHEMA app TO org_app;
+          GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA app TO org_app;
+          SQL
+
+      - name: Create governance browser identities
+        working-directory: apps/web
+        shell: bash
+        run: |
+          set -euo pipefail
+          npx --yes auth@1.7.1 create-admin --config src/lib/auth.ts --email "$E2E_GOV_REQUESTER_EMAIL" --password "$E2E_GOV_REQUESTER_PASSWORD" --name "E2E Governance Requester" --role user --yes
+          npx --yes auth@1.7.1 create-admin --config src/lib/auth.ts --email "$E2E_GOV_COUNCIL_EMAIL" --password "$E2E_GOV_COUNCIL_PASSWORD" --name "E2E Governance Council" --role user --yes
+          npx --yes auth@1.7.1 create-admin --config src/lib/auth.ts --email "$E2E_GOV_SELF_REVIEWER_EMAIL" --password "$E2E_GOV_SELF_REVIEWER_PASSWORD" --name "E2E Governance Self Reviewer" --role user --yes
+          npx --yes auth@1.7.1 create-admin --config src/lib/auth.ts --email "$E2E_GOV_BREAKER_EMAIL" --password "$E2E_GOV_BREAKER_PASSWORD" --name "E2E Governance Break Glass" --role user --yes
+          npx --yes auth@1.7.1 create-admin --config src/lib/auth.ts --email "$E2E_GOV_SCOPED_COUNCIL_EMAIL" --password "$E2E_GOV_SCOPED_COUNCIL_PASSWORD" --name "E2E Governance Scoped Council" --role user --yes
+
+      - name: Seed protected governance fixtures
+        env:
+          PGPASSWORD: postgres
+        run: |
+          psql -h 127.0.0.1 -U postgres -d org_os -v ON_ERROR_STOP=1 \
+            -v requester_email="$E2E_GOV_REQUESTER_EMAIL" \
+            -v requester_id="$E2E_GOV_REQUESTER_PERSON_ID" \
+            -v council_email="$E2E_GOV_COUNCIL_EMAIL" \
+            -v council_id="$E2E_GOV_COUNCIL_PERSON_ID" \
+            -v self_email="$E2E_GOV_SELF_REVIEWER_EMAIL" \
+            -v self_id="$E2E_GOV_SELF_REVIEWER_PERSON_ID" \
+            -v breaker_email="$E2E_GOV_BREAKER_EMAIL" \
+            -v breaker_id="$E2E_GOV_BREAKER_PERSON_ID" \
+            -v scoped_email="$E2E_GOV_SCOPED_COUNCIL_EMAIL" \
+            -v scoped_id="$E2E_GOV_SCOPED_COUNCIL_PERSON_ID" \
+            -v target_id="$E2E_GOV_TARGET_PERSON_ID" \
+            -v team_a="$E2E_GOV_TEAM_A_ID" \
+            -v team_b="$E2E_GOV_TEAM_B_ID" \
+            -v revoke_assignment="$E2E_GOV_REVOKE_ASSIGNMENT_ID" <<'SQL'
+          INSERT INTO app.person_profile (id, auth_user_id, display_name, membership_status)
+          SELECT :'requester_id'::uuid, id, 'E2E Governance Requester', 'member' FROM auth."user" WHERE lower(email) = lower(:'requester_email');
+          INSERT INTO app.person_profile (id, auth_user_id, display_name, membership_status)
+          SELECT :'council_id'::uuid, id, 'E2E Governance Council', 'member' FROM auth."user" WHERE lower(email) = lower(:'council_email');
+          INSERT INTO app.person_profile (id, auth_user_id, display_name, membership_status)
+          SELECT :'self_id'::uuid, id, 'E2E Governance Self Reviewer', 'member' FROM auth."user" WHERE lower(email) = lower(:'self_email');
+          INSERT INTO app.person_profile (id, auth_user_id, display_name, membership_status)
+          SELECT :'breaker_id'::uuid, id, 'E2E Governance Break Glass', 'member' FROM auth."user" WHERE lower(email) = lower(:'breaker_email');
+          INSERT INTO app.person_profile (id, auth_user_id, display_name, membership_status)
+          SELECT :'scoped_id'::uuid, id, 'E2E Governance Scoped Council', 'member' FROM auth."user" WHERE lower(email) = lower(:'scoped_email');
+          INSERT INTO app.person_profile (id, auth_user_id, display_name, membership_status)
+          VALUES (:'target_id'::uuid, 'e2e-governance-target-no-login', 'E2E Governance Target', 'member');
+
+          INSERT INTO app.team (id, name, game_title, division, state)
+          VALUES
+            (:'team_a'::uuid, 'E2E Governance Team A', 'NBA 2K27', 'governance-proof', 'active'),
+            (:'team_b'::uuid, 'E2E Governance Team B', 'NBA 2K27', 'governance-proof', 'active');
+
+          INSERT INTO app.role_assignment (person_id, role_key, scope_type, reason)
+          VALUES (:'requester_id'::uuid, 'privileged_admin', 'organization', 'CI protected-role governance technical requester.');
+          INSERT INTO app.role_assignment (person_id, role_key, scope_type, reason)
+          VALUES (:'council_id'::uuid, 'council', 'organization', 'CI protected-role governance independent Council approver.');
+          INSERT INTO app.role_assignment (person_id, role_key, scope_type, reason)
+          VALUES
+            (:'self_id'::uuid, 'privileged_admin', 'organization', 'CI dual-role self-review attacker technical authority.'),
+            (:'self_id'::uuid, 'council', 'organization', 'CI dual-role self-review attacker Council authority.');
+          INSERT INTO app.role_assignment (person_id, role_key, scope_type, reason)
+          VALUES
+            (:'breaker_id'::uuid, 'council', 'organization', 'CI Council plus break-glass misuse fixture.'),
+            (:'breaker_id'::uuid, 'break_glass', 'organization', 'CI active break-glass misuse fixture.', now(), now() + interval '60 minutes');
+          INSERT INTO app.role_assignment (person_id, role_key, scope_type, scope_id, reason)
+          VALUES (:'scoped_id'::uuid, 'council', 'team', :'team_a'::uuid, 'CI Team A scoped Council authorization fixture.');
+
+          INSERT INTO app.role_assignment (
+            id, person_id, role_key, scope_type, granted_by, reason
+          ) VALUES (
+            :'revoke_assignment'::uuid,
+            :'target_id'::uuid,
+            'integrity_officer',
+            'organization',
+            :'council_id'::uuid,
+            'CI pre-existing protected role used to prove governed historical revocation.'
+          );
+          SQL
+
+      - name: Typecheck governance implementation
+        run: npm run typecheck
+
+      - name: Build production app
+        run: npm run build
+
+      - name: Install Chromium
+        working-directory: apps/web
+        run: npx playwright install --with-deps chromium
+
+      - name: Run protected-role governance Red Room
+        working-directory: apps/web
+        run: npx playwright test tests/e2e/governance-role-changes.spec.ts --project=desktop-chrome
+
+      - name: Verify governance persistence and negative non-mutation
+        env:
+          PGPASSWORD: postgres
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          request_count="$(psql -h 127.0.0.1 -U postgres -d org_os -At -v ON_ERROR_STOP=1 -c "SELECT count(*) FROM app.role_change_request;")"
+          test "$request_count" = "7"
+
+          request_audits="$(psql -h 127.0.0.1 -U postgres -d org_os -At -v ON_ERROR_STOP=1 -c "SELECT count(*) FROM app.audit_event WHERE domain = 'governance' AND action = 'role_change.requested';")"
+          test "$request_audits" = "7"
+
+          positive_state="$(psql -h 127.0.0.1 -U postgres -d org_os -At -v ON_ERROR_STOP=1 -c "SELECT state || ':' || CASE WHEN reviewed_by = '$E2E_GOV_COUNCIL_PERSON_ID'::uuid THEN 'council' ELSE 'other' END || ':' || CASE WHEN result_assignment_id IS NULL THEN 'missing' ELSE 'result' END FROM app.role_change_request WHERE operation='grant' AND target_person_id='$E2E_GOV_TARGET_PERSON_ID'::uuid AND role_key='safeguarding_officer' AND scope_type='organization';")"
+          test "$positive_state" = "executed:council:result"
+
+          positive_role="$(psql -h 127.0.0.1 -U postgres -d org_os -At -v ON_ERROR_STOP=1 -c "SELECT count(*) FROM app.role_assignment WHERE person_id='$E2E_GOV_TARGET_PERSON_ID'::uuid AND role_key='safeguarding_officer' AND scope_type='organization' AND scope_id IS NULL AND revoked_at IS NULL AND (ends_at IS NULL OR ends_at > now());")"
+          test "$positive_role" = "1"
+
+          positive_grant_audit="$(psql -h 127.0.0.1 -U postgres -d org_os -At -v ON_ERROR_STOP=1 -c "SELECT count(*) FROM app.audit_event ae JOIN app.role_change_request r ON r.correlation_id = ae.correlation_id WHERE r.target_person_id='$E2E_GOV_TARGET_PERSON_ID'::uuid AND r.role_key='safeguarding_officer' AND r.scope_type='organization' AND ae.action='role.granted';")"
+          test "$positive_grant_audit" = "1"
+
+          self_review_state="$(psql -h 127.0.0.1 -U postgres -d org_os -At -v ON_ERROR_STOP=1 -c "SELECT state FROM app.role_change_request WHERE requested_by='$E2E_GOV_SELF_REVIEWER_PERSON_ID'::uuid AND target_person_id='$E2E_GOV_TARGET_PERSON_ID'::uuid AND role_key='finance_reconciler';")"
+          test "$self_review_state" = "pending"
+          self_review_role="$(psql -h 127.0.0.1 -U postgres -d org_os -At -v ON_ERROR_STOP=1 -c "SELECT count(*) FROM app.role_assignment WHERE person_id='$E2E_GOV_TARGET_PERSON_ID'::uuid AND role_key='finance_reconciler' AND revoked_at IS NULL;")"
+          test "$self_review_role" = "0"
+
+          self_elevation_state="$(psql -h 127.0.0.1 -U postgres -d org_os -At -v ON_ERROR_STOP=1 -c "SELECT state FROM app.role_change_request WHERE target_person_id='$E2E_GOV_COUNCIL_PERSON_ID'::uuid AND role_key='privileged_admin';")"
+          test "$self_elevation_state" = "pending"
+          council_privileged="$(psql -h 127.0.0.1 -U postgres -d org_os -At -v ON_ERROR_STOP=1 -c "SELECT count(*) FROM app.role_assignment WHERE person_id='$E2E_GOV_COUNCIL_PERSON_ID'::uuid AND role_key='privileged_admin' AND revoked_at IS NULL;")"
+          test "$council_privileged" = "0"
+
+          rejection_state="$(psql -h 127.0.0.1 -U postgres -d org_os -At -v ON_ERROR_STOP=1 -c "SELECT state || ':' || CASE WHEN reviewed_by='$E2E_GOV_COUNCIL_PERSON_ID'::uuid THEN 'council' ELSE 'other' END FROM app.role_change_request WHERE target_person_id='$E2E_GOV_TARGET_PERSON_ID'::uuid AND role_key='finance_submitter';")"
+          test "$rejection_state" = "rejected:council"
+          rejected_role="$(psql -h 127.0.0.1 -U postgres -d org_os -At -v ON_ERROR_STOP=1 -c "SELECT count(*) FROM app.role_assignment WHERE person_id='$E2E_GOV_TARGET_PERSON_ID'::uuid AND role_key='finance_submitter' AND revoked_at IS NULL;")"
+          test "$rejected_role" = "0"
+          rejection_audit="$(psql -h 127.0.0.1 -U postgres -d org_os -At -v ON_ERROR_STOP=1 -c "SELECT count(*) FROM app.audit_event WHERE domain='governance' AND action='role_change.rejected';")"
+          test "$rejection_audit" = "1"
+
+          revoke_state="$(psql -h 127.0.0.1 -U postgres -d org_os -At -v ON_ERROR_STOP=1 -c "SELECT state || ':' || CASE WHEN reviewed_by='$E2E_GOV_COUNCIL_PERSON_ID'::uuid THEN 'council' ELSE 'other' END || ':' || CASE WHEN result_assignment_id='$E2E_GOV_REVOKE_ASSIGNMENT_ID'::uuid THEN 'same' ELSE 'other' END FROM app.role_change_request WHERE operation='revoke' AND target_assignment_id='$E2E_GOV_REVOKE_ASSIGNMENT_ID'::uuid;")"
+          test "$revoke_state" = "executed:council:same"
+          revoke_history="$(psql -h 127.0.0.1 -U postgres -d org_os -At -v ON_ERROR_STOP=1 -c "SELECT CASE WHEN revoked_at IS NULL THEN 'active' ELSE 'revoked' END || ':' || CASE WHEN revoked_by='$E2E_GOV_COUNCIL_PERSON_ID'::uuid THEN 'council' ELSE 'other' END || ':' || revocation_reason FROM app.role_assignment WHERE id='$E2E_GOV_REVOKE_ASSIGNMENT_ID'::uuid;")"
+          test "$revoke_history" = "revoked:council:E2E governed protected revocation must preserve historical assignment row."
+          revoke_audit="$(psql -h 127.0.0.1 -U postgres -d org_os -At -v ON_ERROR_STOP=1 -c "SELECT count(*) FROM app.audit_event ae JOIN app.role_change_request r ON r.correlation_id=ae.correlation_id WHERE r.target_assignment_id='$E2E_GOV_REVOKE_ASSIGNMENT_ID'::uuid AND ae.action='role.revoked';")"
+          test "$revoke_audit" = "1"
+
+          break_glass_state="$(psql -h 127.0.0.1 -U postgres -d org_os -At -v ON_ERROR_STOP=1 -c "SELECT state FROM app.role_change_request WHERE target_person_id='$E2E_GOV_TARGET_PERSON_ID'::uuid AND role_key='finance_approver';")"
+          test "$break_glass_state" = "pending"
+          break_glass_role="$(psql -h 127.0.0.1 -U postgres -d org_os -At -v ON_ERROR_STOP=1 -c "SELECT count(*) FROM app.role_assignment WHERE person_id='$E2E_GOV_TARGET_PERSON_ID'::uuid AND role_key='finance_approver' AND revoked_at IS NULL;")"
+          test "$break_glass_role" = "0"
+
+          scoped_state="$(psql -h 127.0.0.1 -U postgres -d org_os -At -v ON_ERROR_STOP=1 -c "SELECT state FROM app.role_change_request WHERE target_person_id='$E2E_GOV_TARGET_PERSON_ID'::uuid AND role_key='safeguarding_officer' AND scope_type='team' AND scope_id='$E2E_GOV_TEAM_B_ID'::uuid;")"
+          test "$scoped_state" = "pending"
+          team_b_role="$(psql -h 127.0.0.1 -U postgres -d org_os -At -v ON_ERROR_STOP=1 -c "SELECT count(*) FROM app.role_assignment WHERE person_id='$E2E_GOV_TARGET_PERSON_ID'::uuid AND role_key='safeguarding_officer' AND scope_type='team' AND scope_id='$E2E_GOV_TEAM_B_ID'::uuid AND revoked_at IS NULL;")"
+          test "$team_b_role" = "0"
+
+          executed_audits="$(psql -h 127.0.0.1 -U postgres -d org_os -At -v ON_ERROR_STOP=1 -c "SELECT count(*) FROM app.audit_event WHERE domain='governance' AND action='role_change.executed';")"
+          test "$executed_audits" = "2"
+
+          protected_grants="$(psql -h 127.0.0.1 -U postgres -d org_os -At -v ON_ERROR_STOP=1 -c "SELECT count(*) FROM app.audit_event WHERE domain='authorization' AND action='role.granted' AND correlation_id IN (SELECT correlation_id FROM app.role_change_request);")"
+          test "$protected_grants" = "1"
+
+          protected_revokes="$(psql -h 127.0.0.1 -U postgres -d org_os -At -v ON_ERROR_STOP=1 -c "SELECT count(*) FROM app.audit_event WHERE domain='authorization' AND action='role.revoked' AND correlation_id IN (SELECT correlation_id FROM app.role_change_request);")"
+          test "$protected_revokes" = "1"
+
+      - name: Upload governance Playwright evidence
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: a0-governance-${{ github.run_id }}
+          path: |
+            apps/web/playwright-report
+            apps/web/test-results
+          if-no-files-found: ignore
+          retention-days: 14
