@@ -1,5 +1,7 @@
 import { expect, test } from "@playwright/test";
 
+const u0IntakeFixtureEnabled = process.env.E2E_U0_INTAKE === "true";
+
 async function expectNoPageOverflow(page: import("@playwright/test").Page) {
   const dimensions = await page.evaluate(() => {
     const clientWidth = document.documentElement.clientWidth;
@@ -51,6 +53,8 @@ const invalidFields = [
 ] as const;
 
 test("server validation errors are programmatically associated with every invalid application field", async ({ page }) => {
+  test.skip(!u0IntakeFixtureEnabled, "Dedicated U0 intake fixture contract is required.");
+
   await page.goto("/apply");
   await expect(page.getByRole("button", { name: "Submit application" })).toBeVisible();
 
@@ -87,6 +91,8 @@ test("server validation errors are programmatically associated with every invali
 });
 
 test("application form remains reachable in reduced-height mobile layout", async ({ page }) => {
+  test.skip(!u0IntakeFixtureEnabled, "Dedicated U0 intake fixture contract is required.");
+
   await page.setViewportSize({ width: 390, height: 430 });
   await page.goto("/apply");
   const portfolio = page.getByLabel(/Portfolio \/ clips \/ profiles/i);
