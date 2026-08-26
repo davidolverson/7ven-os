@@ -5,12 +5,15 @@ DO $$
 DECLARE
   person_a uuid := gen_random_uuid();
   person_b uuid := gen_random_uuid();
+  role_id uuid := gen_random_uuid();
   event_id uuid := gen_random_uuid();
   participant_id uuid := gen_random_uuid();
   result_id uuid := gen_random_uuid();
   audit_id bigint;
   blocked boolean;
   blocking_count integer;
+  active_role_count integer;
+  role_expiry timestamptz;
 BEGIN
   INSERT INTO app.person_profile (id, auth_user_id, display_name)
   VALUES
@@ -37,6 +40,49 @@ BEGIN
   END;
   IF NOT blocked THEN
     RAISE EXCEPTION 'role_assignment accepted an organization scope with non-NULL scope_id';
+  END IF;
+
+  INSERT INTO app.role_assignment (
+    id, person_id, role_key, scope_type, scope_id, reason, starts_at, ends_at
+  ) VALUES (
+    role_id, person_a, 'member', 'organization', NULL,
+    'DB invariant future assignment revocation proof.',
+    now() + interval '1 hour', NULL
+  );
+
+  UPDATE app.role_assignment
+     SET revoked_at = now(),
+         revoked_by = person_b,
+         revocation_reason = 'DB invariant revokes a future role without rewriting expiry.'
+   WHERE id = role_id;
+
+  SELECT ends_at INTO role_expiry
+    FROM app.role_assignment
+   WHERE id = role_id;
+  IF role_expiry IS NOT NULL THEN
+    RAISE EXCEPTION 'explicit role revocation rewrote scheduled expiry';
+  END IF;
+
+  SELECT count(*) INTO active_role_count
+    FROM app.role_assignment
+   WHERE id = role_id
+     AND revoked_at IS NULL
+     AND starts_at <= now()
+     AND (ends_at IS NULL OR ends_at > now());
+  IF active_role_count <> 0 THEN
+    RAISE EXCEPTION 'revoked future role still qualified as active';
+  END IF;
+
+  blocked := false;
+  BEGIN
+    UPDATE app.role_assignment
+       SET revoked_at = now(), revoked_by = person_b, revocation_reason = NULL
+     WHERE id = role_id;
+  EXCEPTION WHEN check_violation THEN
+    blocked := true;
+  END;
+  IF NOT blocked THEN
+    RAISE EXCEPTION 'role_assignment allowed revocation metadata without a reason';
   END IF;
 
   INSERT INTO app.audit_event (actor_person_id, domain, action, target_type, target_id)
