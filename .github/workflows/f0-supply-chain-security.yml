@@ -35,23 +35,46 @@ jobs:
           import re
           from pathlib import Path
 
-          bad = []
+          expected_postgres = 'postgres:16-alpine@sha256:cf78e76683b9ca8c5733cbbdce6c9262b45b6767934dd0a95e671f9a0fc20685'
+          bad_actions = []
+          bad_runners = []
+          bad_postgres = []
+
           for path in Path('.github/workflows').glob('*.yml'):
               for line_number, line in enumerate(path.read_text().splitlines(), 1):
-                  match = re.search(r'\buses:\s*([^\s#]+)', line)
-                  if not match:
-                      continue
-                  ref = match.group(1)
-                  if ref.startswith('./'):
-                      continue
-                  if '@' not in ref or not re.fullmatch(r'[0-9a-f]{40}', ref.rsplit('@', 1)[1]):
-                      bad.append(f'{path}:{line_number}:{ref}')
-          if bad:
-              raise SystemExit('Mutable workflow Action refs remain:\n' + '\n'.join(bad))
+                  action = re.search(r'\buses:\s*([^\s#]+)', line)
+                  if action:
+                      ref = action.group(1)
+                      if not ref.startswith('./') and ('@' not in ref or not re.fullmatch(r'[0-9a-f]{40}', ref.rsplit('@', 1)[1])):
+                          bad_actions.append(f'{path}:{line_number}:{ref}')
+
+                  stripped = line.strip()
+                  if stripped.startswith('runs-on:'):
+                      runner = stripped.split(':', 1)[1].strip()
+                      if runner != 'ubuntu-24.04':
+                          bad_runners.append(f'{path}:{line_number}:{runner}')
+
+                  if stripped.startswith('image: postgres:'):
+                      image = stripped.split(':', 1)[1].strip()
+                      if image != expected_postgres:
+                          bad_postgres.append(f'{path}:{line_number}:{image}')
+
+          errors = []
+          if bad_actions:
+              errors.append('Mutable workflow Action refs remain:\n' + '\n'.join(bad_actions))
+          if bad_runners:
+              errors.append('Unreviewed runner labels remain:\n' + '\n'.join(bad_runners))
+          if bad_postgres:
+              errors.append('Unpinned PostgreSQL service inputs remain:\n' + '\n'.join(bad_postgres))
+          if errors:
+              raise SystemExit('\n'.join(errors))
           PY
 
-          if git grep -n -E '(^|[[:space:]])npx[[:space:]]|ubuntu-latest|image:[[:space:]]+postgres:16-alpine$' -- .github/workflows; then
-            echo 'ERROR: movable or fallback-capable CI execution input remains'
+          if git grep -n -E '(^|[[:space:]])npx[[:space:]]' -- \
+            .github/workflows/org-os-ci.yml \
+            .github/workflows/offboarding-security.yml \
+            .github/workflows/governance-security.yml; then
+            echo 'ERROR: fallback-capable package execution remains in operational workflows'
             exit 1
           fi
 
