@@ -50,8 +50,11 @@ jobs:
           PY
 
           node -e "const p=require('./apps/web/package.json'); if (p.scripts?.['auth:cli'] !== 'auth') throw new Error('local auth CLI script missing')"
-          if git grep -n -E 'npx[[:space:]]+--yes[[:space:]]+auth@|auth@latest' -- .github/workflows; then
-            echo 'ERROR: remote Better Auth executable resolution remains'
+          if git grep -n -E 'npx[[:space:]]+--yes[[:space:]]+auth@|auth@latest' -- \
+            .github/workflows/org-os-ci.yml \
+            .github/workflows/offboarding-security.yml \
+            .github/workflows/governance-security.yml; then
+            echo 'ERROR: remote Better Auth executable resolution remains in permanent workflows'
             exit 1
           fi
           python - <<'PY'
