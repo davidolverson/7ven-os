@@ -7,6 +7,8 @@ import { transaction } from "@/lib/db";
 import { consumeRateLimit } from "@/lib/rate-limit";
 import { writeAuditEvent } from "@/lib/audit";
 
+const MAX_APPLICATION_BYTES = 32_768;
+
 const applicationSchema = z.object({
   displayName: z.string().trim().min(2).max(80),
   email: z.string().trim().email().max(254),
@@ -23,9 +25,65 @@ interface ApplicationRow extends QueryResultRow {
   state: string;
 }
 
-function jsonError(status: number, code: string, message: string, headers?: HeadersInit) {
-  const init: ResponseInit = headers ? { status, headers } : { status };
-  return NextResponse.json({ error: { code, message } }, init);
+class PayloadTooLargeError extends Error {
+  constructor() {
+    super("Application payload exceeds the configured byte limit.");
+    this.name = "PayloadTooLargeError";
+  }
+}
+
+function responseHeaders(correlationId: string, headers?: HeadersInit) {
+  const result = new Headers(headers);
+  result.set("Cache-Control", "no-store");
+  result.set("X-Correlation-ID", correlationId);
+  return result;
+}
+
+function jsonError(
+  correlationId: string,
+  status: number,
+  code: string,
+  message: string,
+  headers?: HeadersInit,
+) {
+  return NextResponse.json(
+    { error: { code, message } },
+    { status, headers: responseHeaders(correlationId, headers) },
+  );
+}
+
+async function readBoundedRequestText(request: Request) {
+  if (!request.body) return "";
+
+  const reader = request.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let totalBytes = 0;
+
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (!value) continue;
+
+      totalBytes += value.byteLength;
+      if (totalBytes > MAX_APPLICATION_BYTES) {
+        await reader.cancel().catch(() => undefined);
+        throw new PayloadTooLargeError();
+      }
+      chunks.push(value);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+
+  const body = new Uint8Array(totalBytes);
+  let offset = 0;
+  for (const chunk of chunks) {
+    body.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+
+  return new TextDecoder().decode(body);
 }
 
 function requestIsSameOrigin(request: Request) {
@@ -45,26 +103,48 @@ function clientRateLimitKey(request: Request, email: string) {
 }
 
 export async function POST(request: Request) {
+  const correlationId = randomUUID();
+
   if (!env.applicationIntakeEnabled) {
-    return jsonError(503, "APPLICATION_INTAKE_CLOSED", "Applications are not open yet.", {
-      "Retry-After": "3600",
-    });
+    return jsonError(
+      correlationId,
+      503,
+      "APPLICATION_INTAKE_CLOSED",
+      "Applications are not open yet.",
+      { "Retry-After": "3600" },
+    );
   }
 
   if (!requestIsSameOrigin(request)) {
-    return jsonError(403, "ORIGIN_NOT_ALLOWED", "This request origin is not allowed.");
+    return jsonError(correlationId, 403, "ORIGIN_NOT_ALLOWED", "This request origin is not allowed.");
   }
 
   const contentLength = Number(request.headers.get("content-length") ?? "0");
-  if (Number.isFinite(contentLength) && contentLength > 32_768) {
-    return jsonError(413, "PAYLOAD_TOO_LARGE", "Application payload is too large.");
+  if (Number.isFinite(contentLength) && contentLength > MAX_APPLICATION_BYTES) {
+    return jsonError(correlationId, 413, "PAYLOAD_TOO_LARGE", "Application payload is too large.");
+  }
+
+  let bodyText: string;
+  try {
+    bodyText = await readBoundedRequestText(request);
+  } catch (error) {
+    if (error instanceof PayloadTooLargeError) {
+      return jsonError(correlationId, 413, "PAYLOAD_TOO_LARGE", "Application payload is too large.");
+    }
+    console.error("application intake body read failed", { correlationId, error });
+    return jsonError(
+      correlationId,
+      500,
+      "APPLICATION_SUBMIT_FAILED",
+      "The application could not be submitted. Try again later.",
+    );
   }
 
   let body: unknown;
   try {
-    body = await request.json();
+    body = JSON.parse(bodyText) as unknown;
   } catch {
-    return jsonError(400, "INVALID_JSON", "Request body must be valid JSON.");
+    return jsonError(correlationId, 400, "INVALID_JSON", "Request body must be valid JSON.");
   }
 
   const parsed = applicationSchema.safeParse(body);
@@ -77,13 +157,36 @@ export async function POST(request: Request) {
           fields: parsed.error.flatten().fieldErrors,
         },
       },
-      { status: 422 },
+      { status: 422, headers: responseHeaders(correlationId) },
     );
   }
 
   // Honeypot: return a normal-looking response without creating data.
   if (parsed.data.companyWebsite) {
-    return NextResponse.json({ ok: true, state: "submitted" }, { status: 202 });
+    return NextResponse.json(
+      { ok: true, state: "submitted" },
+      { status: 202, headers: responseHeaders(correlationId) },
+    );
+  }
+
+  const rawIdempotencyKey = request.headers.get("idempotency-key");
+  if (!rawIdempotencyKey) {
+    return jsonError(
+      correlationId,
+      400,
+      "IDEMPOTENCY_KEY_REQUIRED",
+      "Idempotency-Key is required for application submissions.",
+    );
+  }
+
+  const idempotency = z.string().uuid().safeParse(rawIdempotencyKey);
+  if (!idempotency.success) {
+    return jsonError(
+      correlationId,
+      400,
+      "INVALID_IDEMPOTENCY_KEY",
+      "Idempotency-Key must be a UUID.",
+    );
   }
 
   const rateLimit = await consumeRateLimit({
@@ -94,36 +197,27 @@ export async function POST(request: Request) {
   });
 
   if (!rateLimit.allowed) {
-    return jsonError(429, "RATE_LIMITED", "Too many application attempts. Try again later.", {
-      "Retry-After": String(rateLimit.retryAfterSeconds),
-      "X-RateLimit-Remaining": "0",
-    });
+    return jsonError(
+      correlationId,
+      429,
+      "RATE_LIMITED",
+      "Too many application attempts. Try again later.",
+      {
+        "Retry-After": String(rateLimit.retryAfterSeconds),
+        "X-RateLimit-Remaining": "0",
+      },
+    );
   }
-
-  const rawIdempotencyKey = request.headers.get("idempotency-key") ?? randomUUID();
-  const idempotency = z.string().uuid().safeParse(rawIdempotencyKey);
-  if (!idempotency.success) {
-    return jsonError(400, "INVALID_IDEMPOTENCY_KEY", "Idempotency-Key must be a UUID.");
-  }
-
-  const correlationId = randomUUID();
 
   try {
     const result = await transaction(async (client) => {
-      const existing = await client.query<ApplicationRow>(
-        `SELECT id, state FROM app.application WHERE idempotency_key = $1 LIMIT 1`,
-        [idempotency.data],
-      );
-
-      if (existing.rows[0]) {
-        return { application: existing.rows[0], replay: true };
-      }
-
       const inserted = await client.query<ApplicationRow>(
         `INSERT INTO app.application (
            email, display_name, requested_track, game_title, payload,
            state, privacy_notice_version, idempotency_key
          ) VALUES ($1, $2, $3, $4, $5::jsonb, 'submitted', $6, $7)
+         ON CONFLICT (idempotency_key) WHERE idempotency_key IS NOT NULL
+         DO NOTHING
          RETURNING id, state`,
         [
           parsed.data.email.toLowerCase(),
@@ -141,25 +235,35 @@ export async function POST(request: Request) {
       );
 
       const application = inserted.rows[0];
-      if (!application) throw new Error("Application insert did not return a record.");
-
-      await writeAuditEvent(
-        {
-          actorKind: "system",
-          domain: "talent",
-          action: "application.submitted",
-          targetType: "application",
-          targetId: application.id,
-          correlationId,
-          metadata: {
-            requestedTrack: parsed.data.requestedTrack,
-            gameTitle: parsed.data.gameTitle ?? null,
+      if (application) {
+        await writeAuditEvent(
+          {
+            actorKind: "system",
+            domain: "talent",
+            action: "application.submitted",
+            targetType: "application",
+            targetId: application.id,
+            correlationId,
+            metadata: {
+              requestedTrack: parsed.data.requestedTrack,
+              gameTitle: parsed.data.gameTitle ?? null,
+            },
           },
-        },
-        client,
-      );
+          client,
+        );
 
-      return { application, replay: false };
+        return { application, replay: false };
+      }
+
+      const existing = await client.query<ApplicationRow>(
+        `SELECT id, state FROM app.application WHERE idempotency_key = $1 LIMIT 1`,
+        [idempotency.data],
+      );
+      const replay = existing.rows[0];
+      if (!replay) {
+        throw new Error("Idempotency conflict did not resolve to an existing application.");
+      }
+      return { application: replay, replay: true };
     });
 
     return NextResponse.json(
@@ -171,14 +275,18 @@ export async function POST(request: Request) {
       },
       {
         status: result.replay ? 200 : 201,
-        headers: {
+        headers: responseHeaders(correlationId, {
           "X-RateLimit-Remaining": String(rateLimit.remaining),
-          "Cache-Control": "no-store",
-        },
+        }),
       },
     );
   } catch (error) {
     console.error("application intake failed", { correlationId, error });
-    return jsonError(500, "APPLICATION_SUBMIT_FAILED", "The application could not be submitted. Try again later.");
+    return jsonError(
+      correlationId,
+      500,
+      "APPLICATION_SUBMIT_FAILED",
+      "The application could not be submitted. Try again later.",
+    );
   }
 }
