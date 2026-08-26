@@ -81,9 +81,16 @@ export async function POST(request: Request) {
 
     const requestHeaders = request.headers;
     const identitySession = await auth.api.getSession({ headers: requestHeaders });
-    const identityUser = identitySession?.user as (typeof identitySession.user & { role?: string | null }) | undefined;
+    if (!identitySession) {
+      return jsonError(
+        403,
+        "IDENTITY_ADMIN_REQUIRED",
+        "Offboarding requires identity-administration authority in addition to Org access-management authority.",
+      );
+    }
 
-    if (!identitySession || identitySession.user.id !== principal.authUserId || !hasIdentityAdminRole(identityUser?.role)) {
+    const identityUser = identitySession.user as typeof identitySession.user & { role?: string | null };
+    if (identitySession.user.id !== principal.authUserId || !hasIdentityAdminRole(identityUser.role)) {
       return jsonError(
         403,
         "IDENTITY_ADMIN_REQUIRED",
