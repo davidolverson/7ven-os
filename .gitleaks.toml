@@ -1,0 +1,42 @@
+title = "Org OS Gitleaks policy"
+
+[extend]
+useDefault = true
+
+# Historical CI fixture values in the standard workflow. Scope is intentionally
+# limited to generic-api-key findings at these exact commits and exact path.
+[[allowlists]]
+description = "Historical isolated CI fixture keys in Org OS CI"
+targetRules = ["generic-api-key"]
+condition = "AND"
+commits = [
+  "175b9350e63d31a6540500ce60b7afef27018253",
+  "778e3dcaaae0413963c51a03cb0774331b4cd262",
+]
+paths = ['''^\.github/workflows/org-os-ci\.yml$''']
+
+# Historical CI fixture values in the A4 workflow.
+[[allowlists]]
+description = "Historical isolated CI fixture keys in A4 offboarding workflow"
+targetRules = ["generic-api-key"]
+condition = "AND"
+commits = ["8a7355f5e9265b523babf7884a7da6c691d1c8a2"]
+paths = ['''^\.github/workflows/offboarding-security\.yml$''']
+
+# Historical CI fixture values in the A0 workflow.
+[[allowlists]]
+description = "Historical isolated CI fixture keys in A0 governance workflow"
+targetRules = ["generic-api-key"]
+condition = "AND"
+commits = ["dc6162d1b20574297ff46ba09307d4cbe1aed00b"]
+paths = ['''^\.github/workflows/governance-security\.yml$''']
+
+# This commit contains only E2E fixture environment-key names at the reported
+# lines; Gitleaks generic-api-key treats those names as matches even though no
+# credential value is embedded in the spec.
+[[allowlists]]
+description = "Governance E2E fixture-key-name false positives"
+targetRules = ["generic-api-key"]
+condition = "AND"
+commits = ["631693ebc58e519ff6045fa0304a769b4de55137"]
+paths = ['''^apps/web/tests/e2e/governance-role-changes\.spec\.ts$''']
