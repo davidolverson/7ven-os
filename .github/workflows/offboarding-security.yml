@@ -17,12 +17,12 @@ concurrency:
 
 jobs:
   offboarding-red-room:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 25
 
     services:
       postgres:
-        image: postgres:16-alpine
+        image: postgres:16-alpine@sha256:cf78e76683b9ca8c5733cbbdce6c9262b45b6767934dd0a95e671f9a0fc20685
         env:
           POSTGRES_USER: postgres
           POSTGRES_PASSWORD: postgres
@@ -195,11 +195,11 @@ jobs:
 
       - name: Install Chromium
         working-directory: apps/web
-        run: npx playwright install --with-deps chromium
+        run: npm run playwright:cli -- install --with-deps chromium
 
       - name: Run A4 offboarding Red Room
         working-directory: apps/web
-        run: npx playwright test tests/e2e/offboarding.spec.ts --project=desktop-chrome
+        run: npm run playwright:cli -- test tests/e2e/offboarding.spec.ts --project=desktop-chrome
 
       - name: Verify successful offboarding persistence and identity disablement
         env:

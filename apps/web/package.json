@@ -10,7 +10,8 @@
     "typecheck": "tsc --noEmit",
     "test:e2e": "playwright test",
     "test:e2e:mobile": "playwright test --project=mobile-chrome --project=mobile-safari",
-    "auth:cli": "auth"
+    "auth:cli": "auth",
+    "playwright:cli": "playwright"
   },
   "dependencies": {
     "@better-auth/passkey": "1.7.1",
