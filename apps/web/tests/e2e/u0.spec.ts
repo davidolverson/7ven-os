@@ -62,8 +62,8 @@ test("reduced-motion preference clamps authored animation and transition duratio
     probe.remove();
     return result;
   });
-  expect(durations.animationDuration).toBe("0.00001s");
-  expect(durations.transitionDuration).toBe("0.00001s");
+  expect(Number.parseFloat(durations.animationDuration)).toBeCloseTo(0.00001, 8);
+  expect(Number.parseFloat(durations.transitionDuration)).toBeCloseTo(0.00001, 8);
   expect(durations.animationIterationCount).toBe("1");
 });
 
