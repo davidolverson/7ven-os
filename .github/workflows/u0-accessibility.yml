@@ -34,6 +34,7 @@ jobs:
       APPLICATION_INTAKE_ENABLED: "true"
       BREAK_GLASS_PRINCIPAL: ""
       E2E_BASE_URL: http://127.0.0.1:3000
+      E2E_U0_INTAKE: "true"
 
     steps:
       - name: Checkout
