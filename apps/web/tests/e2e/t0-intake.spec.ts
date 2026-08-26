@@ -188,18 +188,14 @@ test.describe("T0 open application intake Red Room", () => {
   });
 
   test("invalid JSON and actual oversized bodies fail without mutation", async ({ request }) => {
-    const invalid = await request.post("/api/applications", {
-      headers: {
-        origin: baseOrigin,
-        "content-type": "application/json",
-        "idempotency-key": randomUUID(),
-        "x-real-ip": "203.0.113.12",
-      },
-      data: "{not-json",
+    const invalid = await postChunkedJson("{not-json", {
+      origin: baseOrigin,
+      "idempotency-key": randomUUID(),
+      "x-real-ip": "203.0.113.12",
     });
-    expect(invalid.status()).toBe(400);
-    privateHeaders(invalid);
-    expect(await invalid.json()).toMatchObject({ error: { code: "INVALID_JSON" } });
+    expect(invalid.status).toBe(400);
+    privateRawHeaders(invalid);
+    expect(JSON.parse(invalid.body)).toMatchObject({ error: { code: "INVALID_JSON" } });
 
     const oversizedPayload = validPayload("oversized");
     oversizedPayload.goals = "X".repeat(40_000);
