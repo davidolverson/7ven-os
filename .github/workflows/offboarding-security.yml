@@ -233,8 +233,8 @@ jobs:
           remaining_sessions="$(psql -h 127.0.0.1 -U postgres -d org_os -At -v ON_ERROR_STOP=1 -c "SELECT count(*) FROM auth.\"session\" WHERE \"userId\" = '$auth_user_id';")"
           test "$remaining_sessions" = "0"
 
-          org_audit="$(psql -h 127.0.0.1 -U postgres -d org_os -At -v ON_ERROR_STOP=1 -c "SELECT count(*) FROM app.audit_event WHERE action = 'organizational_access.offboarded' AND target_id = '$E2E_OFFBOARD_TARGET_PERSON_ID'::uuid;")"
-          identity_audit="$(psql -h 127.0.0.1 -U postgres -d org_os -At -v ON_ERROR_STOP=1 -c "SELECT count(*) FROM app.audit_event WHERE action = 'identity_access.revoked' AND target_id = '$E2E_OFFBOARD_TARGET_PERSON_ID'::uuid;")"
+          org_audit="$(psql -h 127.0.0.1 -U postgres -d org_os -At -v ON_ERROR_STOP=1 -c "SELECT count(*) FROM app.audit_event WHERE action = 'organizational_access.offboarded' AND target_id = '$E2E_OFFBOARD_TARGET_PERSON_ID';")"
+          identity_audit="$(psql -h 127.0.0.1 -U postgres -d org_os -At -v ON_ERROR_STOP=1 -c "SELECT count(*) FROM app.audit_event WHERE action = 'identity_access.revoked' AND target_id = '$E2E_OFFBOARD_TARGET_PERSON_ID';")"
           test "$org_audit" = "1"
           test "$identity_audit" = "1"
 
@@ -263,9 +263,9 @@ jobs:
           execution_state="$(psql -h 127.0.0.1 -U postgres -d org_os -At -v ON_ERROR_STOP=1 -c "SELECT state || ':' || attempt_count::text || ':' || CASE WHEN identity_error_code IS NULL THEN 'missing' ELSE 'recorded' END || ':' || CASE WHEN identity_attempt_token IS NULL THEN 'clear' ELSE 'set' END FROM app.offboarding_execution WHERE person_id = '$E2E_OFFBOARD_PHANTOM_PERSON_ID'::uuid AND decision_ref = 'E2E-OFFBOARD-PARTIAL';")"
           test "$execution_state" = "identity_failed:2:recorded:clear"
 
-          org_audit="$(psql -h 127.0.0.1 -U postgres -d org_os -At -v ON_ERROR_STOP=1 -c "SELECT count(*) FROM app.audit_event WHERE action = 'organizational_access.offboarded' AND target_id = '$E2E_OFFBOARD_PHANTOM_PERSON_ID'::uuid;")"
-          failure_audit="$(psql -h 127.0.0.1 -U postgres -d org_os -At -v ON_ERROR_STOP=1 -c "SELECT count(*) FROM app.audit_event WHERE action = 'identity_access.revocation_failed' AND target_id = '$E2E_OFFBOARD_PHANTOM_PERSON_ID'::uuid;")"
-          success_audit="$(psql -h 127.0.0.1 -U postgres -d org_os -At -v ON_ERROR_STOP=1 -c "SELECT count(*) FROM app.audit_event WHERE action = 'identity_access.revoked' AND target_id = '$E2E_OFFBOARD_PHANTOM_PERSON_ID'::uuid;")"
+          org_audit="$(psql -h 127.0.0.1 -U postgres -d org_os -At -v ON_ERROR_STOP=1 -c "SELECT count(*) FROM app.audit_event WHERE action = 'organizational_access.offboarded' AND target_id = '$E2E_OFFBOARD_PHANTOM_PERSON_ID';")"
+          failure_audit="$(psql -h 127.0.0.1 -U postgres -d org_os -At -v ON_ERROR_STOP=1 -c "SELECT count(*) FROM app.audit_event WHERE action = 'identity_access.revocation_failed' AND target_id = '$E2E_OFFBOARD_PHANTOM_PERSON_ID';")"
+          success_audit="$(psql -h 127.0.0.1 -U postgres -d org_os -At -v ON_ERROR_STOP=1 -c "SELECT count(*) FROM app.audit_event WHERE action = 'identity_access.revoked' AND target_id = '$E2E_OFFBOARD_PHANTOM_PERSON_ID';")"
           test "$org_audit" = "1"
           test "$failure_audit" = "2"
           test "$success_audit" = "0"
