@@ -1,0 +1,31 @@
+name: F0 Lockfile Probe
+
+on:
+  push:
+    branches:
+      - org-os-production-foundation
+
+permissions:
+  contents: read
+
+jobs:
+  generate-reviewed-cli-lock-diff:
+    if: github.event.head_commit.message == 'ci: generate f0 lockfile probe'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+      - name: Setup Node
+        uses: actions/setup-node@v7
+        with:
+          node-version: 24.19.0
+          package-manager-cache: false
+      - name: Generate exact auth CLI lockfile diff without package scripts
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm install --workspace apps/web --save-dev --package-lock-only --ignore-scripts --no-audit --no-fund auth@1.7.1
+          echo 'F0_LOCK_DIFF_BEGIN'
+          git diff -- apps/web/package.json package-lock.json
+          echo 'F0_LOCK_DIFF_END'
