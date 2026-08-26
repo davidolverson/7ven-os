@@ -5,7 +5,7 @@ import { z } from "zod";
 import { auth } from "@/lib/auth";
 import { requirePermission } from "@/lib/access";
 import { writeAuditEvent } from "@/lib/audit";
-import { query, transaction } from "@/lib/db";
+import { transaction } from "@/lib/db";
 import { accessErrorResponse, jsonError, requestIsSameOrigin } from "@/lib/request-security";
 
 const offboardSchema = z.object({
@@ -24,10 +24,21 @@ interface PersonAccessRow extends QueryResultRow {
 
 interface RevokedRoleRow extends QueryResultRow {
   id: string;
-  role_key: string;
-  scope_type: string;
-  scope_id: string | null;
-  revoked_at: Date;
+}
+
+interface OffboardingExecutionRow extends QueryResultRow {
+  id: string;
+  person_id: string;
+  requested_by: string;
+  decision_ref: string;
+  reason: string;
+  state: "org_disabled" | "identity_failed" | "complete";
+  correlation_id: string;
+  identity_error_code: string | null;
+  attempt_count: number;
+  org_disabled_at: Date;
+  last_identity_attempt_at: Date | null;
+  identity_completed_at: Date | null;
 }
 
 function hasIdentityAdminRole(value: unknown) {
@@ -37,6 +48,11 @@ function hasIdentityAdminRole(value: unknown) {
     .map((role) => role.trim())
     .filter(Boolean)
     .includes("admin");
+}
+
+function sanitizedIdentityErrorCode(error: unknown) {
+  if (error instanceof Error && error.name) return error.name.slice(0, 120);
+  return "IDENTITY_PROVIDER_ERROR";
 }
 
 export async function POST(request: Request) {
@@ -70,7 +86,7 @@ export async function POST(request: Request) {
     );
   }
 
-  const correlationId = randomUUID();
+  const requestCorrelationId = randomUUID();
 
   try {
     const principal = await requirePermission("roles:manage", { type: "organization" });
@@ -98,119 +114,304 @@ export async function POST(request: Request) {
       );
     }
 
-    const targetLookup = await query<PersonAccessRow>(
-      `SELECT id, auth_user_id, display_name, membership_status, active
-         FROM app.person_profile
-        WHERE id = $1
-        LIMIT 1`,
-      [parsed.data.targetPersonId],
-    );
-    const target = targetLookup.rows[0];
-    if (!target) {
-      return jsonError(404, "PERSON_NOT_FOUND", "The target person was not found.");
-    }
-
-    try {
-      // Normalize the target back to the non-admin Better Auth role before ending sessions.
-      // This prevents a later credential sign-in from regaining identity-admin authority.
-      await auth.api.setRole({
-        headers: requestHeaders,
-        body: { userId: target.auth_user_id, role: "user" },
-      });
-      await auth.api.revokeUserSessions({
-        headers: requestHeaders,
-        body: { userId: target.auth_user_id },
-      });
-    } catch (error) {
-      console.error("identity offboarding failed", { correlationId, targetPersonId: target.id, error });
-      return jsonError(502, "IDENTITY_REVOCATION_FAILED", "Identity access could not be fully revoked. No Org deactivation was assumed complete.");
-    }
-
-    const result = await transaction(async (client) => {
-      await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [`offboard:${target.id}`]);
+    // Phase 1 is the security boundary: Org access is disabled transactionally before any
+    // external identity-provider call. Once this commits, later failures are not allowed
+    // to reactivate the person or restore role history.
+    const phaseOne = await transaction(async (client) => {
+      await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [`offboard:${parsed.data.targetPersonId}`]);
 
       const selected = await client.query<PersonAccessRow>(
         `SELECT id, auth_user_id, display_name, membership_status, active
            FROM app.person_profile
           WHERE id = $1
           FOR UPDATE`,
-        [target.id],
+        [parsed.data.targetPersonId],
       );
-      const lockedTarget = selected.rows[0];
-      if (!lockedTarget) return { kind: "missing" as const };
+      const target = selected.rows[0];
+      if (!target) return { kind: "missing" as const };
 
-      const revokedRoles = await client.query<RevokedRoleRow>(
-        `UPDATE app.role_assignment
-            SET revoked_at = now(),
-                revoked_by = $2,
-                revocation_reason = $3
-          WHERE person_id = $1
-            AND revoked_at IS NULL
-            AND (ends_at IS NULL OR ends_at > now())
-          RETURNING id, role_key, scope_type, scope_id, revoked_at`,
-        [lockedTarget.id, principal.personId, parsed.data.reason],
+      const sameDecision = await client.query<OffboardingExecutionRow>(
+        `SELECT id, person_id, requested_by, decision_ref, reason, state, correlation_id,
+                identity_error_code, attempt_count, org_disabled_at,
+                last_identity_attempt_at, identity_completed_at
+           FROM app.offboarding_execution
+          WHERE person_id = $1 AND decision_ref = $2
+          FOR UPDATE`,
+        [target.id, parsed.data.decisionRef],
       );
+      let execution = sameDecision.rows[0];
 
-      const wasActive = lockedTarget.active;
-      const beforeMembershipStatus = lockedTarget.membership_status;
+      if (!execution) {
+        const otherIncomplete = await client.query<OffboardingExecutionRow>(
+          `SELECT id, person_id, requested_by, decision_ref, reason, state, correlation_id,
+                  identity_error_code, attempt_count, org_disabled_at,
+                  last_identity_attempt_at, identity_completed_at
+             FROM app.offboarding_execution
+            WHERE person_id = $1 AND state IN ('org_disabled', 'identity_failed')
+            LIMIT 1
+            FOR UPDATE`,
+          [target.id],
+        );
+        if (otherIncomplete.rows[0]) {
+          return { kind: "decision_conflict" as const, execution: otherIncomplete.rows[0] };
+        }
 
-      if (lockedTarget.active || lockedTarget.membership_status !== "inactive") {
+        const revokedRoles = await client.query<RevokedRoleRow>(
+          `UPDATE app.role_assignment
+              SET revoked_at = now(),
+                  revoked_by = $2,
+                  revocation_reason = $3
+            WHERE person_id = $1
+              AND revoked_at IS NULL
+              AND (ends_at IS NULL OR ends_at > now())
+            RETURNING id`,
+          [target.id, principal.personId, parsed.data.reason],
+        );
+
+        const wasActive = target.active;
+        const previousMembershipStatus = target.membership_status;
+
         await client.query(
           `UPDATE app.person_profile
               SET active = false,
                   membership_status = 'inactive',
                   updated_at = now()
             WHERE id = $1`,
-          [lockedTarget.id],
+          [target.id],
+        );
+
+        const inserted = await client.query<OffboardingExecutionRow>(
+          `INSERT INTO app.offboarding_execution (
+             person_id, requested_by, decision_ref, reason, state, correlation_id, org_disabled_at
+           ) VALUES ($1, $2, $3, $4, 'org_disabled', $5, now())
+           RETURNING id, person_id, requested_by, decision_ref, reason, state, correlation_id,
+                     identity_error_code, attempt_count, org_disabled_at,
+                     last_identity_attempt_at, identity_completed_at`,
+          [target.id, principal.personId, parsed.data.decisionRef, parsed.data.reason, requestCorrelationId],
+        );
+        execution = inserted.rows[0];
+        if (!execution) throw new Error("Offboarding execution insert did not return a row.");
+
+        await writeAuditEvent(
+          {
+            actorPersonId: principal.personId,
+            domain: "identity",
+            action: "organizational_access.offboarded",
+            targetType: "person_profile",
+            targetId: target.id,
+            beforeState: {
+              active: wasActive,
+              membershipStatus: previousMembershipStatus,
+            },
+            afterState: {
+              active: false,
+              membershipStatus: "inactive",
+              revokedRoleIds: revokedRoles.rows.map((row) => row.id),
+              identityState: "pending",
+              offboardingExecutionId: execution.id,
+            },
+            reason: parsed.data.reason,
+            correlationId: execution.correlation_id,
+            metadata: {
+              decisionRef: parsed.data.decisionRef,
+              revokedRoleCount: revokedRoles.rowCount,
+            },
+          },
+          client,
+        );
+      } else {
+        // Reassert fail-closed Org state on retries. The normal role API already refuses
+        // inactive people, but this prevents manual/legacy mutations from reviving access.
+        await client.query(
+          `UPDATE app.role_assignment
+              SET revoked_at = COALESCE(revoked_at, now()),
+                  revoked_by = COALESCE(revoked_by, $2),
+                  revocation_reason = COALESCE(revocation_reason, $3)
+            WHERE person_id = $1
+              AND revoked_at IS NULL
+              AND (ends_at IS NULL OR ends_at > now())`,
+          [target.id, principal.personId, parsed.data.reason],
+        );
+        await client.query(
+          `UPDATE app.person_profile
+              SET active = false,
+                  membership_status = 'inactive',
+                  updated_at = CASE WHEN active OR membership_status <> 'inactive' THEN now() ELSE updated_at END
+            WHERE id = $1`,
+          [target.id],
         );
       }
 
-      if (!wasActive && beforeMembershipStatus === "inactive" && revokedRoles.rowCount === 0) {
-        return { kind: "replay" as const, revokedRoleIds: [] as string[] };
-      }
+      return {
+        kind: execution.state === "complete" ? "complete" as const : "ready" as const,
+        target,
+        execution,
+        replay: sameDecision.rows[0] !== undefined,
+      };
+    });
 
-      const revokedRoleIds = revokedRoles.rows.map((role) => role.id);
+    if (phaseOne.kind === "missing") {
+      return jsonError(404, "PERSON_NOT_FOUND", "The target person was not found.");
+    }
+    if (phaseOne.kind === "decision_conflict") {
+      return NextResponse.json(
+        {
+          error: {
+            code: "OFFBOARDING_ALREADY_IN_PROGRESS",
+            message: "A different offboarding decision is already incomplete for this person.",
+          },
+          executionId: phaseOne.execution.id,
+          orgAccessDisabled: true,
+        },
+        { status: 409, headers: { "Cache-Control": "no-store" } },
+      );
+    }
+    if (phaseOne.kind === "complete") {
+      return NextResponse.json(
+        {
+          ok: true,
+          replay: true,
+          targetPersonId: phaseOne.target.id,
+          executionId: phaseOne.execution.id,
+          state: "complete",
+          orgAccessDisabled: true,
+          identityAccessDisabled: true,
+        },
+        { status: 200, headers: { "Cache-Control": "no-store" } },
+      );
+    }
+
+    const { target, execution } = phaseOne;
+
+    // Record the attempt before crossing into the separately governed identity domain.
+    await transaction(async (client) => {
+      await client.query(
+        `UPDATE app.offboarding_execution
+            SET attempt_count = attempt_count + 1,
+                last_identity_attempt_at = now(),
+                updated_at = now()
+          WHERE id = $1 AND state <> 'complete'`,
+        [execution.id],
+      );
+    });
+
+    try {
+      // Better Auth 1.7.1 banUser prevents future sign-in and revokes all existing sessions.
+      // Normalize the stored identity role afterward so a future governed unban cannot
+      // accidentally restore identity-admin authority.
+      await auth.api.banUser({
+        headers: requestHeaders,
+        body: {
+          userId: target.auth_user_id,
+          banReason: `Org offboarding decision ${parsed.data.decisionRef}`,
+        },
+      });
+      await auth.api.setRole({
+        headers: requestHeaders,
+        body: { userId: target.auth_user_id, role: "user" },
+      });
+    } catch (error) {
+      const errorCode = sanitizedIdentityErrorCode(error);
+
+      await transaction(async (client) => {
+        await client.query(
+          `UPDATE app.offboarding_execution
+              SET state = 'identity_failed',
+                  identity_error_code = $2,
+                  identity_completed_at = NULL,
+                  updated_at = now()
+            WHERE id = $1`,
+          [execution.id, errorCode],
+        );
+
+        await writeAuditEvent(
+          {
+            actorPersonId: principal.personId,
+            domain: "identity",
+            action: "identity_access.revocation_failed",
+            targetType: "person_profile",
+            targetId: target.id,
+            afterState: {
+              orgAccessDisabled: true,
+              identityState: "failed",
+              offboardingExecutionId: execution.id,
+            },
+            reason: parsed.data.reason,
+            correlationId: execution.correlation_id,
+            metadata: {
+              decisionRef: parsed.data.decisionRef,
+              errorCode,
+            },
+          },
+          client,
+        );
+      });
+
+      console.error("identity offboarding incomplete", {
+        correlationId: execution.correlation_id,
+        executionId: execution.id,
+        targetPersonId: target.id,
+        errorCode,
+      });
+
+      return NextResponse.json(
+        {
+          error: {
+            code: "IDENTITY_REVOCATION_PENDING",
+            message: "Organizational access is disabled, but identity cleanup did not complete and must be retried.",
+          },
+          executionId: execution.id,
+          orgAccessDisabled: true,
+          identityRevocationPending: true,
+          retryable: true,
+        },
+        { status: 502, headers: { "Cache-Control": "no-store" } },
+      );
+    }
+
+    await transaction(async (client) => {
+      await client.query(
+        `UPDATE app.offboarding_execution
+            SET state = 'complete',
+                identity_error_code = NULL,
+                identity_completed_at = now(),
+                updated_at = now()
+          WHERE id = $1`,
+        [execution.id],
+      );
+
       await writeAuditEvent(
         {
           actorPersonId: principal.personId,
           domain: "identity",
-          action: "organizational_access.offboarded",
+          action: "identity_access.revoked",
           targetType: "person_profile",
-          targetId: lockedTarget.id,
-          beforeState: {
-            active: wasActive,
-            membershipStatus: beforeMembershipStatus,
-          },
+          targetId: target.id,
           afterState: {
-            active: false,
-            membershipStatus: "inactive",
-            identityRole: "user",
+            orgAccessDisabled: true,
+            signInDisabled: true,
             sessionsRevoked: true,
-            revokedRoleIds,
+            identityRole: "user",
+            identityState: "complete",
+            offboardingExecutionId: execution.id,
           },
           reason: parsed.data.reason,
-          correlationId,
-          metadata: {
-            decisionRef: parsed.data.decisionRef,
-            revokedRoleCount: revokedRoleIds.length,
-          },
+          correlationId: execution.correlation_id,
+          metadata: { decisionRef: parsed.data.decisionRef },
         },
         client,
       );
-
-      return { kind: "offboarded" as const, revokedRoleIds };
     });
-
-    if (result.kind === "missing") {
-      return jsonError(404, "PERSON_NOT_FOUND", "The target person was not found during offboarding.");
-    }
 
     return NextResponse.json(
       {
         ok: true,
-        replay: result.kind === "replay",
+        replay: phaseOne.replay,
         targetPersonId: target.id,
-        revokedRoleCount: result.revokedRoleIds.length,
+        executionId: execution.id,
+        state: "complete",
+        orgAccessDisabled: true,
+        identityAccessDisabled: true,
       },
       { status: 200, headers: { "Cache-Control": "no-store" } },
     );
@@ -218,7 +419,7 @@ export async function POST(request: Request) {
     const denied = accessErrorResponse(error);
     if (denied) return denied;
 
-    console.error("organizational offboarding failed", { correlationId, error });
+    console.error("organizational offboarding failed", { correlationId: requestCorrelationId, error });
     return jsonError(500, "OFFBOARD_FAILED", "Organizational access could not be offboarded.");
   }
 }
