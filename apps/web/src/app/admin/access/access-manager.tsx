@@ -22,6 +22,7 @@ export interface AccessAssignment {
   scopeId: string | null;
   startsAt: string;
   endsAt: string | null;
+  revokedAt: string | null;
 }
 
 const protectedRoleKeys = new Set<string>(governanceProtectedRoleKeys);
@@ -90,7 +91,7 @@ export function AccessManager({
 
     form.reset();
     setScopeType("organization");
-    setSuccess(response.status === 200 ? "That active role assignment already exists." : "Role assignment created and audited.");
+    setSuccess(response.status === 200 ? "That unrevoked role assignment already exists." : "Role assignment created and audited.");
     setPending(null);
     router.refresh();
   }
@@ -119,7 +120,7 @@ export function AccessManager({
     }
 
     setRevokeReason("");
-    setSuccess("Role access ended without deleting its history.");
+    setSuccess("Role access was revoked without deleting or rewriting its original expiry history.");
     setPending(null);
     router.refresh();
   }
@@ -188,7 +189,7 @@ export function AccessManager({
       <section className="card stack">
         <div>
           <h2>Active and historical assignments</h2>
-          <p className="muted">Revocation sets an end time; it never deletes assignment or audit history. Protected authority cannot be revoked from this technical surface without break-glass.</p>
+          <p className="muted">Expiry and explicit revocation are separate. Neither path deletes the original assignment or its audit history. Protected authority remains outside this direct technical path without break-glass.</p>
         </div>
 
         <div className="field">
@@ -212,21 +213,25 @@ export function AccessManager({
               </thead>
               <tbody>
                 {assignments.map((assignment) => {
-                  const ended = assignment.endsAt ? new Date(assignment.endsAt).getTime() <= Date.now() : false;
+                  const now = Date.now();
+                  const revoked = assignment.revokedAt !== null;
+                  const scheduled = !revoked && new Date(assignment.startsAt).getTime() > now;
+                  const ended = !revoked && assignment.endsAt ? new Date(assignment.endsAt).getTime() <= now : false;
                   const protectedAuthority = assignment.roleKey === "break_glass" || protectedRoleKeys.has(assignment.roleKey);
-                  const mayRevoke = !ended && (!protectedAuthority || canRevokeBreakGlass);
+                  const mayRevoke = !revoked && !ended && (!protectedAuthority || canRevokeBreakGlass);
+                  const state = revoked ? "Revoked" : scheduled ? "Scheduled" : ended ? "Ended" : "Active";
                   return (
                     <tr key={assignment.id}>
                       <td>{assignment.displayName}</td>
                       <td>{assignment.roleKey}</td>
                       <td>{assignment.scopeType}{assignment.scopeId ? ` · ${assignment.scopeId}` : ""}</td>
-                      <td><span className="badge" data-tone={ended ? undefined : "good"}>{ended ? "Ended" : "Active"}</span></td>
+                      <td><span className="badge" data-tone={state === "Active" ? "good" : undefined}>{state}</span></td>
                       <td>
                         {mayRevoke ? (
                           <button className="button" type="button" disabled={pending !== null} onClick={() => void revokeRole(assignment.id)}>
                             {pending === assignment.id ? "Revoking…" : "Revoke"}
                           </button>
-                        ) : protectedAuthority && !ended ? "Governed" : "—"}
+                        ) : protectedAuthority && !revoked && !ended ? "Governed" : "—"}
                       </td>
                     </tr>
                   );
