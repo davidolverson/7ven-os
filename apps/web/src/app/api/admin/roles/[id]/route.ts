@@ -8,9 +8,7 @@ import { writeAuditEvent } from "@/lib/audit";
 import { transaction } from "@/lib/db";
 import { accessErrorResponse, jsonError, requestIsSameOrigin } from "@/lib/request-security";
 
-const revokeSchema = z.object({
-  reason: z.string().trim().min(10).max(500),
-});
+const revokeSchema = z.object({ reason: z.string().trim().min(10).max(500) });
 
 interface AssignmentRow extends QueryResultRow {
   id: string;
@@ -35,10 +33,7 @@ function hasActiveBreakGlass(roles: readonly { role_key: RoleKey }[]) {
   return roles.some((role) => role.role_key === "break_glass");
 }
 
-export async function PATCH(
-  request: Request,
-  context: { params: Promise<{ id: string }> },
-) {
+export async function PATCH(request: Request, context: { params: Promise<{ id: string }> }) {
   if (!requestIsSameOrigin(request)) {
     return jsonError(403, "ORIGIN_NOT_ALLOWED", "This request origin is not allowed.");
   }
@@ -59,13 +54,7 @@ export async function PATCH(
   const parsed = revokeSchema.safeParse(body);
   if (!parsed.success) {
     return NextResponse.json(
-      {
-        error: {
-          code: "VALIDATION_FAILED",
-          message: "A revocation reason is required.",
-          fields: parsed.error.flatten().fieldErrors,
-        },
-      },
+      { error: { code: "VALIDATION_FAILED", message: "A revocation reason is required.", fields: parsed.error.flatten().fieldErrors } },
       { status: 422, headers: { "Cache-Control": "no-store" } },
     );
   }
@@ -94,7 +83,6 @@ export async function PATCH(
       if (roleRequiresGovernanceApproval(assignment.role_key) && !breakGlass) {
         return { kind: "governance_forbidden" as const };
       }
-
       if (assignment.revoked_at) {
         return { kind: "already_revoked" as const, assignment };
       }
@@ -104,9 +92,7 @@ export async function PATCH(
 
       const updated = await client.query<AssignmentRow>(
         `UPDATE app.role_assignment
-            SET revoked_at = now(),
-                revoked_by = $2,
-                revocation_reason = $3
+            SET revoked_at = now(), revoked_by = $2, revocation_reason = $3
           WHERE id = $1
           RETURNING id, person_id, role_key, scope_type, scope_id, starts_at, ends_at,
                     revoked_at, revoked_by, revocation_reason`,
@@ -129,7 +115,7 @@ export async function PATCH(
             scopeId: assignment.scope_id,
             startsAt: assignment.starts_at.toISOString(),
             endsAt: assignment.ends_at?.toISOString() ?? null,
-            revokedAt: assignment.revoked_at?.toISOString() ?? null,
+            revokedAt: null,
           },
           afterState: {
             personId: revoked.person_id,
@@ -150,18 +136,10 @@ export async function PATCH(
       return { kind: "revoked" as const, assignment: revoked };
     });
 
-    if (result.kind === "missing") {
-      return jsonError(404, "ROLE_ASSIGNMENT_NOT_FOUND", "The role assignment was not found.");
-    }
-    if (result.kind === "break_glass_forbidden") {
-      return jsonError(403, "BREAK_GLASS_REQUIRES_BREAK_GLASS", "Only an active break-glass principal may revoke break-glass access.");
-    }
+    if (result.kind === "missing") return jsonError(404, "ROLE_ASSIGNMENT_NOT_FOUND", "The role assignment was not found.");
+    if (result.kind === "break_glass_forbidden") return jsonError(403, "BREAK_GLASS_REQUIRES_BREAK_GLASS", "Only an active break-glass principal may revoke break-glass access.");
     if (result.kind === "governance_forbidden") {
-      return jsonError(
-        403,
-        "GOVERNANCE_APPROVAL_REQUIRED",
-        "This sensitive or governance role cannot be revoked through direct technical access management.",
-      );
+      return jsonError(403, "GOVERNANCE_APPROVAL_REQUIRED", "This sensitive or governance role cannot be revoked through direct technical access management.");
     }
 
     return NextResponse.json(
@@ -169,14 +147,13 @@ export async function PATCH(
         ok: true,
         roleAssignmentId: result.assignment.id,
         replay: result.kind === "already_revoked" || result.kind === "already_ended",
-        state: result.kind === "already_ended" ? "ended" : result.kind === "already_revoked" ? "revoked" : "revoked",
+        state: result.kind === "already_ended" ? "ended" : "revoked",
       },
       { status: 200, headers: { "Cache-Control": "no-store" } },
     );
   } catch (error) {
     const denied = accessErrorResponse(error);
     if (denied) return denied;
-
     console.error("role revocation failed", { correlationId, error });
     return jsonError(500, "ROLE_REVOKE_FAILED", "The role assignment could not be revoked.");
   }
