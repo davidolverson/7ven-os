@@ -185,9 +185,9 @@ jobs:
           VALUES
             (:'self_id'::uuid, 'privileged_admin', 'organization', 'CI dual-role self-review attacker technical authority.'),
             (:'self_id'::uuid, 'council', 'organization', 'CI dual-role self-review attacker Council authority.');
-          INSERT INTO app.role_assignment (person_id, role_key, scope_type, reason)
+          INSERT INTO app.role_assignment (person_id, role_key, scope_type, reason, starts_at, ends_at)
           VALUES
-            (:'breaker_id'::uuid, 'council', 'organization', 'CI Council plus break-glass misuse fixture.'),
+            (:'breaker_id'::uuid, 'council', 'organization', 'CI Council plus break-glass misuse fixture.', now(), NULL),
             (:'breaker_id'::uuid, 'break_glass', 'organization', 'CI active break-glass misuse fixture.', now(), now() + interval '60 minutes');
           INSERT INTO app.role_assignment (person_id, role_key, scope_type, scope_id, reason)
           VALUES (:'scoped_id'::uuid, 'council', 'team', :'team_a'::uuid, 'CI Team A scoped Council authorization fixture.');
