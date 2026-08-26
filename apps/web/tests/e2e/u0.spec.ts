@@ -91,7 +91,7 @@ test("current primary route is programmatically identified and browser history w
   await expect(page.locator(".sidebar").getByRole("link", { name: "Competition" })).toHaveAttribute("aria-current", "page");
 });
 
-test("all mobile primary navigation targets remain at least 44 by 44 CSS pixels", async ({ page }, testInfo) => {
+test("all mobile primary navigation targets remain at least 44 by 44 CSS pixels", async ({ page }) => {
   const width = page.viewportSize()?.width ?? 9999;
   test.skip(width > 920, "Mobile target test only applies to mobile/tablet shell.");
   await signIn(page);
@@ -111,7 +111,7 @@ test("all mobile primary navigation targets remain at least 44 by 44 CSS pixels"
   await expectNoPageOverflow(page);
 });
 
-test("fixed mobile navigation does not cover end-of-content sentinel", async ({ page }, testInfo) => {
+test("fixed mobile navigation does not cover end-of-content sentinel", async ({ page }) => {
   const width = page.viewportSize()?.width ?? 9999;
   test.skip(width > 920, "Fixed bottom navigation test only applies to the mobile shell.");
   await signIn(page);
