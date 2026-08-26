@@ -14,6 +14,8 @@ const offboardSchema = z.object({
   reason: z.string().trim().min(10).max(500),
 });
 
+const identityAttemptLeaseMinutes = 5;
+
 interface PersonAccessRow extends QueryResultRow {
   id: string;
   auth_user_id: string;
@@ -22,8 +24,13 @@ interface PersonAccessRow extends QueryResultRow {
   active: boolean;
 }
 
-interface RevokedRoleRow extends QueryResultRow {
+interface IdRow extends QueryResultRow {
   id: string;
+}
+
+interface ExternalIdentityRow extends QueryResultRow {
+  id: string;
+  provider: string;
 }
 
 interface OffboardingExecutionRow extends QueryResultRow {
@@ -32,9 +39,10 @@ interface OffboardingExecutionRow extends QueryResultRow {
   requested_by: string;
   decision_ref: string;
   reason: string;
-  state: "org_disabled" | "identity_failed" | "complete";
+  state: "org_disabled" | "identity_in_progress" | "identity_failed" | "complete";
   correlation_id: string;
   identity_error_code: string | null;
+  identity_attempt_token: string | null;
   attempt_count: number;
   org_disabled_at: Date;
   last_identity_attempt_at: Date | null;
@@ -53,6 +61,28 @@ function hasIdentityAdminRole(value: unknown) {
 function sanitizedIdentityErrorCode(error: unknown) {
   if (error instanceof Error && error.name) return error.name.slice(0, 120);
   return "IDENTITY_PROVIDER_ERROR";
+}
+
+async function enqueueDisconnectProjections(
+  client: import("pg").PoolClient,
+  externalIdentities: readonly ExternalIdentityRow[],
+) {
+  const jobIds: string[] = [];
+
+  for (const identity of externalIdentities) {
+    const inserted = await client.query<IdRow>(
+      `INSERT INTO app.projection_job (
+         provider, entity_type, entity_id, desired_state, status, next_attempt_at
+       ) VALUES ($1, 'external_identity', $2, $3::jsonb, 'pending', now())
+       RETURNING id`,
+      [identity.provider, identity.id, JSON.stringify({ connected: false, reason: "offboarding" })],
+    );
+    const job = inserted.rows[0];
+    if (!job) throw new Error("Projection disconnect insert did not return a row.");
+    jobIds.push(job.id);
+  }
+
+  return jobIds;
 }
 
 export async function POST(request: Request) {
@@ -114,9 +144,8 @@ export async function POST(request: Request) {
       );
     }
 
-    // Phase 1 is the security boundary: Org access is disabled transactionally before any
-    // external identity-provider call. Once this commits, later failures are not allowed
-    // to reactivate the person or restore role history.
+    // Phase 1 is the fail-closed security boundary. It removes all currently modeled Org
+    // authority before any call into the separately governed identity domain.
     const phaseOne = await transaction(async (client) => {
       await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [`offboard:${parsed.data.targetPersonId}`]);
 
@@ -132,7 +161,7 @@ export async function POST(request: Request) {
 
       const sameDecision = await client.query<OffboardingExecutionRow>(
         `SELECT id, person_id, requested_by, decision_ref, reason, state, correlation_id,
-                identity_error_code, attempt_count, org_disabled_at,
+                identity_error_code, identity_attempt_token, attempt_count, org_disabled_at,
                 last_identity_attempt_at, identity_completed_at
            FROM app.offboarding_execution
           WHERE person_id = $1 AND decision_ref = $2
@@ -144,10 +173,10 @@ export async function POST(request: Request) {
       if (!execution) {
         const otherIncomplete = await client.query<OffboardingExecutionRow>(
           `SELECT id, person_id, requested_by, decision_ref, reason, state, correlation_id,
-                  identity_error_code, attempt_count, org_disabled_at,
+                  identity_error_code, identity_attempt_token, attempt_count, org_disabled_at,
                   last_identity_attempt_at, identity_completed_at
              FROM app.offboarding_execution
-            WHERE person_id = $1 AND state IN ('org_disabled', 'identity_failed')
+            WHERE person_id = $1 AND state IN ('org_disabled', 'identity_in_progress', 'identity_failed')
             LIMIT 1
             FOR UPDATE`,
           [target.id],
@@ -155,37 +184,58 @@ export async function POST(request: Request) {
         if (otherIncomplete.rows[0]) {
           return { kind: "decision_conflict" as const, execution: otherIncomplete.rows[0] };
         }
+      }
 
-        const revokedRoles = await client.query<RevokedRoleRow>(
-          `UPDATE app.role_assignment
-              SET revoked_at = now(),
-                  revoked_by = $2,
-                  revocation_reason = $3
-            WHERE person_id = $1
-              AND revoked_at IS NULL
-              AND (ends_at IS NULL OR ends_at > now())
-            RETURNING id`,
-          [target.id, principal.personId, parsed.data.reason],
-        );
+      const revokedRoles = await client.query<IdRow>(
+        `UPDATE app.role_assignment
+            SET revoked_at = now(),
+                revoked_by = $2,
+                revocation_reason = $3
+          WHERE person_id = $1
+            AND revoked_at IS NULL
+            AND (ends_at IS NULL OR ends_at > now())
+          RETURNING id`,
+        [target.id, principal.personId, parsed.data.reason],
+      );
 
-        const wasActive = target.active;
-        const previousMembershipStatus = target.membership_status;
+      const endedRosters = await client.query<IdRow>(
+        `UPDATE app.roster_membership
+            SET roster_state = 'inactive',
+                ended_at = now()
+          WHERE person_id = $1
+            AND ended_at IS NULL
+          RETURNING id`,
+        [target.id],
+      );
 
-        await client.query(
-          `UPDATE app.person_profile
-              SET active = false,
-                  membership_status = 'inactive',
-                  updated_at = now()
-            WHERE id = $1`,
-          [target.id],
-        );
+      const disconnectedIdentities = await client.query<ExternalIdentityRow>(
+        `UPDATE app.external_identity
+            SET disconnected_at = now()
+          WHERE person_id = $1
+            AND disconnected_at IS NULL
+          RETURNING id, provider`,
+        [target.id],
+      );
+      const projectionJobIds = await enqueueDisconnectProjections(client, disconnectedIdentities.rows);
 
+      const wasActive = target.active;
+      const previousMembershipStatus = target.membership_status;
+      await client.query(
+        `UPDATE app.person_profile
+            SET active = false,
+                membership_status = 'inactive',
+                updated_at = CASE WHEN active OR membership_status <> 'inactive' THEN now() ELSE updated_at END
+          WHERE id = $1`,
+        [target.id],
+      );
+
+      if (!execution) {
         const inserted = await client.query<OffboardingExecutionRow>(
           `INSERT INTO app.offboarding_execution (
              person_id, requested_by, decision_ref, reason, state, correlation_id, org_disabled_at
            ) VALUES ($1, $2, $3, $4, 'org_disabled', $5, now())
            RETURNING id, person_id, requested_by, decision_ref, reason, state, correlation_id,
-                     identity_error_code, attempt_count, org_disabled_at,
+                     identity_error_code, identity_attempt_token, attempt_count, org_disabled_at,
                      last_identity_attempt_at, identity_completed_at`,
           [target.id, principal.personId, parsed.data.decisionRef, parsed.data.reason, requestCorrelationId],
         );
@@ -207,6 +257,9 @@ export async function POST(request: Request) {
               active: false,
               membershipStatus: "inactive",
               revokedRoleIds: revokedRoles.rows.map((row) => row.id),
+              endedRosterMembershipIds: endedRosters.rows.map((row) => row.id),
+              disconnectedExternalIdentityIds: disconnectedIdentities.rows.map((row) => row.id),
+              projectionJobIds,
               identityState: "pending",
               offboardingExecutionId: execution.id,
             },
@@ -215,30 +268,39 @@ export async function POST(request: Request) {
             metadata: {
               decisionRef: parsed.data.decisionRef,
               revokedRoleCount: revokedRoles.rowCount,
+              endedRosterCount: endedRosters.rowCount,
+              disconnectedIdentityCount: disconnectedIdentities.rowCount,
+              projectionJobCount: projectionJobIds.length,
             },
           },
           client,
         );
-      } else {
-        // Reassert fail-closed Org state on retries. The normal role API already refuses
-        // inactive people, but this prevents manual/legacy mutations from reviving access.
-        await client.query(
-          `UPDATE app.role_assignment
-              SET revoked_at = COALESCE(revoked_at, now()),
-                  revoked_by = COALESCE(revoked_by, $2),
-                  revocation_reason = COALESCE(revocation_reason, $3)
-            WHERE person_id = $1
-              AND revoked_at IS NULL
-              AND (ends_at IS NULL OR ends_at > now())`,
-          [target.id, principal.personId, parsed.data.reason],
-        );
-        await client.query(
-          `UPDATE app.person_profile
-              SET active = false,
-                  membership_status = 'inactive',
-                  updated_at = CASE WHEN active OR membership_status <> 'inactive' THEN now() ELSE updated_at END
-            WHERE id = $1`,
-          [target.id],
+      } else if (
+        revokedRoles.rowCount > 0 ||
+        endedRosters.rowCount > 0 ||
+        disconnectedIdentities.rowCount > 0
+      ) {
+        await writeAuditEvent(
+          {
+            actorPersonId: principal.personId,
+            domain: "identity",
+            action: "organizational_access.offboarding_reasserted",
+            targetType: "person_profile",
+            targetId: target.id,
+            afterState: {
+              active: false,
+              membershipStatus: "inactive",
+              revokedRoleIds: revokedRoles.rows.map((row) => row.id),
+              endedRosterMembershipIds: endedRosters.rows.map((row) => row.id),
+              disconnectedExternalIdentityIds: disconnectedIdentities.rows.map((row) => row.id),
+              projectionJobIds,
+              offboardingExecutionId: execution.id,
+            },
+            reason: parsed.data.reason,
+            correlationId: execution.correlation_id,
+            metadata: { decisionRef: parsed.data.decisionRef },
+          },
+          client,
         );
       }
 
@@ -282,47 +344,111 @@ export async function POST(request: Request) {
     }
 
     const { target, execution } = phaseOne;
+    const identityAttemptToken = randomUUID();
 
-    // Record the attempt before crossing into the separately governed identity domain.
-    await transaction(async (client) => {
-      await client.query(
+    // Phase 2 is a fenced claim. Only one request may perform identity cleanup at a time.
+    // A stale claim may be recovered after the lease, but its old token can no longer
+    // finalize state, which prevents duplicate success/failure evidence.
+    const claim = await transaction(async (client) => {
+      const claimed = await client.query<OffboardingExecutionRow>(
         `UPDATE app.offboarding_execution
-            SET attempt_count = attempt_count + 1,
+            SET state = 'identity_in_progress',
+                identity_error_code = NULL,
+                identity_attempt_token = $2,
+                attempt_count = attempt_count + 1,
                 last_identity_attempt_at = now(),
                 updated_at = now()
-          WHERE id = $1 AND state <> 'complete'`,
+          WHERE id = $1
+            AND (
+              state IN ('org_disabled', 'identity_failed')
+              OR (
+                state = 'identity_in_progress'
+                AND last_identity_attempt_at < now() - ($3::text || ' minutes')::interval
+              )
+            )
+          RETURNING id, person_id, requested_by, decision_ref, reason, state, correlation_id,
+                    identity_error_code, identity_attempt_token, attempt_count, org_disabled_at,
+                    last_identity_attempt_at, identity_completed_at`,
+        [execution.id, identityAttemptToken, identityAttemptLeaseMinutes],
+      );
+      if (claimed.rows[0]) return { kind: "claimed" as const, execution: claimed.rows[0] };
+
+      const current = await client.query<OffboardingExecutionRow>(
+        `SELECT id, person_id, requested_by, decision_ref, reason, state, correlation_id,
+                identity_error_code, identity_attempt_token, attempt_count, org_disabled_at,
+                last_identity_attempt_at, identity_completed_at
+           FROM app.offboarding_execution
+          WHERE id = $1`,
         [execution.id],
       );
+      const currentExecution = current.rows[0];
+      if (!currentExecution) throw new Error("Offboarding execution disappeared before identity claim.");
+      return { kind: "busy" as const, execution: currentExecution };
     });
 
-    try {
-      // Better Auth 1.7.1 banUser prevents future sign-in and revokes all existing sessions.
-      // Normalize the stored identity role afterward so a future governed unban cannot
-      // accidentally restore identity-admin authority.
-      await auth.api.banUser({
-        headers: requestHeaders,
-        body: {
-          userId: target.auth_user_id,
-          banReason: `Org offboarding decision ${parsed.data.decisionRef}`,
+    if (claim.kind === "busy") {
+      if (claim.execution.state === "complete") {
+        return NextResponse.json(
+          {
+            ok: true,
+            replay: true,
+            targetPersonId: target.id,
+            executionId: claim.execution.id,
+            state: "complete",
+            orgAccessDisabled: true,
+            identityAccessDisabled: true,
+          },
+          { status: 200, headers: { "Cache-Control": "no-store" } },
+        );
+      }
+
+      return NextResponse.json(
+        {
+          error: {
+            code: "IDENTITY_REVOCATION_IN_PROGRESS",
+            message: "Organizational access is disabled and identity cleanup is already in progress.",
+          },
+          executionId: claim.execution.id,
+          orgAccessDisabled: true,
+          identityRevocationPending: true,
+          retryable: true,
         },
-      });
+        { status: 409, headers: { "Cache-Control": "no-store", "Retry-After": "5" } },
+      );
+    }
+
+    try {
+      // Demote first so a later ban failure cannot leave identity-admin authority available.
+      // Better Auth 1.7.1 banUser then disables future sign-in and revokes existing sessions.
       await auth.api.setRole({
         headers: requestHeaders,
         body: { userId: target.auth_user_id, role: "user" },
       });
+      await auth.api.banUser({
+        headers: requestHeaders,
+        body: {
+          userId: target.auth_user_id,
+          banReason: "Organizational access offboarding",
+        },
+      });
     } catch (error) {
       const errorCode = sanitizedIdentityErrorCode(error);
 
-      await transaction(async (client) => {
-        await client.query(
+      const failureRecorded = await transaction(async (client) => {
+        const updated = await client.query<IdRow>(
           `UPDATE app.offboarding_execution
               SET state = 'identity_failed',
-                  identity_error_code = $2,
+                  identity_error_code = $3,
+                  identity_attempt_token = NULL,
                   identity_completed_at = NULL,
                   updated_at = now()
-            WHERE id = $1`,
-          [execution.id, errorCode],
+            WHERE id = $1
+              AND state = 'identity_in_progress'
+              AND identity_attempt_token = $2
+            RETURNING id`,
+          [execution.id, identityAttemptToken, errorCode],
         );
+        if (!updated.rows[0]) return false;
 
         await writeAuditEvent(
           {
@@ -345,7 +471,24 @@ export async function POST(request: Request) {
           },
           client,
         );
+        return true;
       });
+
+      if (!failureRecorded) {
+        return NextResponse.json(
+          {
+            error: {
+              code: "OFFBOARDING_ATTEMPT_SUPERSEDED",
+              message: "Organizational access remains disabled, but this identity cleanup attempt was superseded by a newer attempt.",
+            },
+            executionId: execution.id,
+            orgAccessDisabled: true,
+            identityRevocationPending: true,
+            retryable: true,
+          },
+          { status: 409, headers: { "Cache-Control": "no-store" } },
+        );
+      }
 
       console.error("identity offboarding incomplete", {
         correlationId: execution.correlation_id,
@@ -369,16 +512,21 @@ export async function POST(request: Request) {
       );
     }
 
-    await transaction(async (client) => {
-      await client.query(
+    const completed = await transaction(async (client) => {
+      const updated = await client.query<IdRow>(
         `UPDATE app.offboarding_execution
             SET state = 'complete',
                 identity_error_code = NULL,
+                identity_attempt_token = NULL,
                 identity_completed_at = now(),
                 updated_at = now()
-          WHERE id = $1`,
-        [execution.id],
+          WHERE id = $1
+            AND state = 'identity_in_progress'
+            AND identity_attempt_token = $2
+          RETURNING id`,
+        [execution.id, identityAttemptToken],
       );
+      if (!updated.rows[0]) return false;
 
       await writeAuditEvent(
         {
@@ -401,7 +549,24 @@ export async function POST(request: Request) {
         },
         client,
       );
+      return true;
     });
+
+    if (!completed) {
+      return NextResponse.json(
+        {
+          error: {
+            code: "OFFBOARDING_ATTEMPT_SUPERSEDED",
+            message: "Organizational access remains disabled, but this identity cleanup attempt was superseded by a newer attempt.",
+          },
+          executionId: execution.id,
+          orgAccessDisabled: true,
+          identityRevocationPending: true,
+          retryable: true,
+        },
+        { status: 409, headers: { "Cache-Control": "no-store" } },
+      );
+    }
 
     return NextResponse.json(
       {
