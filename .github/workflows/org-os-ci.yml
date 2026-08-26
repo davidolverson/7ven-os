@@ -65,10 +65,10 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Setup Node
-        uses: actions/setup-node@v7
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
           node-version: 24.19.0
           package-manager-cache: false
@@ -105,7 +105,7 @@ jobs:
 
       - name: Migrate Better Auth schema
         working-directory: apps/web
-        run: npx --yes auth@1.7.1 migrate --config src/lib/auth.ts --yes
+        run: npm run auth:cli -- migrate --config src/lib/auth.ts --yes
 
       - name: Apply Org application migrations
         env:
@@ -156,7 +156,7 @@ jobs:
       - name: Create isolated E2E identity admin
         working-directory: apps/web
         run: >-
-          npx --yes auth@1.7.1 create-admin
+          npm run auth:cli -- create-admin
           --config src/lib/auth.ts
           --email "$E2E_ADMIN_EMAIL"
           --password "$E2E_ADMIN_PASSWORD"
@@ -167,7 +167,7 @@ jobs:
       - name: Create privileged E2E identity
         working-directory: apps/web
         run: >-
-          npx --yes auth@1.7.1 create-admin
+          npm run auth:cli -- create-admin
           --config src/lib/auth.ts
           --email "$E2E_PRIVILEGED_EMAIL"
           --password "$E2E_PRIVILEGED_PASSWORD"
@@ -178,7 +178,7 @@ jobs:
       - name: Create isolated MFA E2E identity without identity-admin authority
         working-directory: apps/web
         run: >-
-          npx --yes auth@1.7.1 create-admin
+          npm run auth:cli -- create-admin
           --config src/lib/auth.ts
           --email "$E2E_MFA_EMAIL"
           --password "$E2E_MFA_PASSWORD"
@@ -189,7 +189,7 @@ jobs:
       - name: Create isolated team-scoped MFA E2E identity
         working-directory: apps/web
         run: >-
-          npx --yes auth@1.7.1 create-admin
+          npm run auth:cli -- create-admin
           --config src/lib/auth.ts
           --email "$E2E_SCOPE_EMAIL"
           --password "$E2E_SCOPE_PASSWORD"
@@ -349,7 +349,7 @@ jobs:
 
       - name: Upload Playwright evidence
         if: always()
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:
           name: playwright-report-${{ github.run_id }}
           path: |
