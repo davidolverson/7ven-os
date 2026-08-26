@@ -1,0 +1,138 @@
+name: F0 Supply Chain Security
+
+on:
+  push:
+    branches:
+      - org-os-production-foundation
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: f0-supply-chain-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  supply-chain-and-secrets:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout full history
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Verify immutable workflow inputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import re
+          from pathlib import Path
+
+          bad = []
+          for path in Path('.github/workflows').glob('*.yml'):
+              for line_number, line in enumerate(path.read_text().splitlines(), 1):
+                  match = re.search(r'\buses:\s*([^\s#]+)', line)
+                  if not match:
+                      continue
+                  ref = match.group(1)
+                  if ref.startswith('./'):
+                      continue
+                  if '@' not in ref or not re.fullmatch(r'[0-9a-f]{40}', ref.rsplit('@', 1)[1]):
+                      bad.append(f'{path}:{line_number}:{ref}')
+          if bad:
+              raise SystemExit('Mutable workflow Action refs remain:\n' + '\n'.join(bad))
+          PY
+
+          if git grep -n -E '(^|[[:space:]])npx[[:space:]]|ubuntu-latest|image:[[:space:]]+postgres:16-alpine$' -- .github/workflows; then
+            echo 'ERROR: movable or fallback-capable CI execution input remains'
+            exit 1
+          fi
+
+          test "$(grep -h -c 'image: postgres:16-alpine@sha256:cf78e76683b9ca8c5733cbbdce6c9262b45b6767934dd0a95e671f9a0fc20685' .github/workflows/org-os-ci.yml .github/workflows/offboarding-security.yml .github/workflows/governance-security.yml | awk '{s+=$1} END {print s}')" = "3"
+
+      - name: Install locked dependencies
+        run: npm ci --include=dev --no-fund --no-audit
+
+      - name: Prove installed-only CLI fail-closed behavior
+        shell: bash
+        env:
+          npm_config_offline: "true"
+          npm_config_registry: http://127.0.0.1:9
+        run: |
+          set -euo pipefail
+          test -x node_modules/.bin/auth
+          test -x node_modules/.bin/playwright
+
+          npm --workspace apps/web run auth:cli -- --help >/dev/null
+          npm --workspace apps/web run playwright:cli -- --version >/dev/null
+
+          tmp_dir="$(mktemp -d)"
+          cleanup() {
+            if [ -e "$tmp_dir/auth" ] || [ -L "$tmp_dir/auth" ]; then
+              mv "$tmp_dir/auth" node_modules/.bin/auth
+            fi
+            if [ -e "$tmp_dir/playwright" ] || [ -L "$tmp_dir/playwright" ]; then
+              mv "$tmp_dir/playwright" node_modules/.bin/playwright
+            fi
+            rm -rf "$tmp_dir"
+          }
+          trap cleanup EXIT
+
+          mv node_modules/.bin/auth "$tmp_dir/auth"
+          if npm --workspace apps/web run auth:cli -- --help >/dev/null 2>&1; then
+            echo 'ERROR: Auth CLI executed after its locked binary was removed'
+            exit 1
+          fi
+          mv "$tmp_dir/auth" node_modules/.bin/auth
+
+          mv node_modules/.bin/playwright "$tmp_dir/playwright"
+          if npm --workspace apps/web run playwright:cli -- --version >/dev/null 2>&1; then
+            echo 'ERROR: Playwright CLI executed after its locked binary was removed'
+            exit 1
+          fi
+          mv "$tmp_dir/playwright" node_modules/.bin/playwright
+
+      - name: Dependency audit
+        run: npm audit --audit-level=high
+
+      - name: Install checksum-verified Gitleaks 8.30.1
+        shell: bash
+        run: |
+          set -euo pipefail
+          archive=/tmp/gitleaks_8.30.1_linux_x64.tar.gz
+          install_dir=/tmp/gitleaks-8.30.1
+          curl --fail --silent --show-error --location \
+            https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_linux_x64.tar.gz \
+            --output "$archive"
+          echo '551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb  /tmp/gitleaks_8.30.1_linux_x64.tar.gz' | sha256sum --check --strict
+          mkdir -p "$install_dir"
+          tar -xzf "$archive" -C "$install_dir" gitleaks
+          test "$($install_dir/gitleaks version)" = '8.30.1'
+
+      - name: Scan repository history with full redaction
+        shell: bash
+        run: |
+          set -euo pipefail
+          /tmp/gitleaks-8.30.1/gitleaks git --redact --no-banner --no-color .
+
+      - name: Prove scanner rejects runtime-only synthetic canary
+        shell: bash
+        run: |
+          set -euo pipefail
+          canary_dir="$(mktemp -d)"
+          trap 'rm -rf "$canary_dir"' EXIT
+          printf 'token=ghp_%s%s\n' '7vEnF0CanaryA1B2C3D4E5F6' 'G7H8I9J0K1L2' > "$canary_dir/canary.txt"
+          if /tmp/gitleaks-8.30.1/gitleaks dir --redact --no-banner --no-color "$canary_dir"; then
+            echo 'ERROR: Gitleaks failed to reject the synthetic canary'
+            exit 1
+          fi
+          rm -rf "$canary_dir"
+          trap - EXIT
+          echo 'Synthetic canary rejected as required.'
