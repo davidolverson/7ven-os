@@ -1,12 +1,24 @@
 import { createHmac } from "node:crypto";
 import { expect, test } from "@playwright/test";
 
-const operatorEmail = process.env.E2E_OFFBOARD_ADMIN_EMAIL ?? "e2e-offboard-admin@example.test";
-const operatorPassword = process.env.E2E_OFFBOARD_ADMIN_PASSWORD ?? "E2E-Offboard-Admin-2026!";
-const targetEmail = process.env.E2E_OFFBOARD_TARGET_EMAIL ?? "e2e-offboard-target@example.test";
-const targetPassword = process.env.E2E_OFFBOARD_TARGET_PASSWORD ?? "E2E-Offboard-Target-2026!";
-const targetPersonId = process.env.E2E_OFFBOARD_TARGET_PERSON_ID ?? "00000000-0000-4000-8000-000000000020";
-const phantomPersonId = process.env.E2E_OFFBOARD_PHANTOM_PERSON_ID ?? "00000000-0000-4000-8000-000000000021";
+const requiredA4FixtureKeys = [
+  "E2E_OFFBOARD_ADMIN_EMAIL",
+  "E2E_OFFBOARD_ADMIN_PASSWORD",
+  "E2E_OFFBOARD_ADMIN_PERSON_ID",
+  "E2E_OFFBOARD_TARGET_EMAIL",
+  "E2E_OFFBOARD_TARGET_PASSWORD",
+  "E2E_OFFBOARD_TARGET_PERSON_ID",
+  "E2E_OFFBOARD_PHANTOM_PERSON_ID",
+  "E2E_OFFBOARD_TEAM_ID",
+] as const;
+
+const hasA4FixtureContract = requiredA4FixtureKeys.every((key) => Boolean(process.env[key]));
+const operatorEmail = process.env.E2E_OFFBOARD_ADMIN_EMAIL ?? "";
+const operatorPassword = process.env.E2E_OFFBOARD_ADMIN_PASSWORD ?? "";
+const targetEmail = process.env.E2E_OFFBOARD_TARGET_EMAIL ?? "";
+const targetPassword = process.env.E2E_OFFBOARD_TARGET_PASSWORD ?? "";
+const targetPersonId = process.env.E2E_OFFBOARD_TARGET_PERSON_ID ?? "";
+const phantomPersonId = process.env.E2E_OFFBOARD_PHANTOM_PERSON_ID ?? "";
 const baseOrigin = new URL(process.env.E2E_BASE_URL ?? "http://127.0.0.1:3000").origin;
 
 function decodeBase32(value: string) {
@@ -79,7 +91,10 @@ async function enrollAndChallengeTotp(page: import("@playwright/test").Page) {
 test.describe.configure({ mode: "serial", retries: 0 });
 
 test("offboarding is fail-closed, race-fenced, replay-safe, and retryable across Org and identity domains", async ({ browser, page }, testInfo) => {
-  test.skip(testInfo.project.name !== "desktop-chrome", "Stateful offboarding acceptance proof runs once on isolated Chromium identities.");
+  test.skip(
+    testInfo.project.name !== "desktop-chrome" || !hasA4FixtureContract,
+    "Stateful A4 acceptance proof runs only in the dedicated lane with its complete fixture contract.",
+  );
 
   const targetContext = await browser.newContext();
   const targetPage = await targetContext.newPage();
