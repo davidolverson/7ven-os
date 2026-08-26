@@ -14,6 +14,10 @@ function firstError(errors: FieldErrors, field: string) {
   return errors[field]?.[0];
 }
 
+function fieldErrorId(field: string) {
+  return `${field}-error`;
+}
+
 export function ApplicationForm() {
   const [submission, setSubmission] = useState<SubmissionState>({ kind: "idle" });
   const [fieldErrors, setFieldErrors] = useState<FieldErrors>({});
@@ -123,11 +127,11 @@ export function ApplicationForm() {
             autoComplete="name"
             maxLength={80}
             aria-invalid={Boolean(firstError(fieldErrors, "displayName"))}
-            aria-describedby={firstError(fieldErrors, "displayName") ? "displayName-error" : undefined}
+            aria-describedby={firstError(fieldErrors, "displayName") ? fieldErrorId("displayName") : undefined}
             required
           />
           {firstError(fieldErrors, "displayName") ? (
-            <span id="displayName-error" className="field-error">{firstError(fieldErrors, "displayName")}</span>
+            <span id={fieldErrorId("displayName")} className="field-error">{firstError(fieldErrors, "displayName")}</span>
           ) : null}
         </div>
 
@@ -142,11 +146,11 @@ export function ApplicationForm() {
             autoComplete="email"
             maxLength={254}
             aria-invalid={Boolean(firstError(fieldErrors, "email"))}
-            aria-describedby={firstError(fieldErrors, "email") ? "email-error" : undefined}
+            aria-describedby={firstError(fieldErrors, "email") ? fieldErrorId("email") : undefined}
             required
           />
           {firstError(fieldErrors, "email") ? (
-            <span id="email-error" className="field-error">{firstError(fieldErrors, "email")}</span>
+            <span id={fieldErrorId("email")} className="field-error">{firstError(fieldErrors, "email")}</span>
           ) : null}
         </div>
 
@@ -158,6 +162,7 @@ export function ApplicationForm() {
             name="requestedTrack"
             defaultValue=""
             aria-invalid={Boolean(firstError(fieldErrors, "requestedTrack"))}
+            aria-describedby={firstError(fieldErrors, "requestedTrack") ? fieldErrorId("requestedTrack") : undefined}
             required
           >
             <option value="" disabled>Select a track</option>
@@ -168,13 +173,24 @@ export function ApplicationForm() {
             <option value="leadership">Leadership</option>
           </select>
           {firstError(fieldErrors, "requestedTrack") ? (
-            <span className="field-error">{firstError(fieldErrors, "requestedTrack")}</span>
+            <span id={fieldErrorId("requestedTrack")} className="field-error">{firstError(fieldErrors, "requestedTrack")}</span>
           ) : null}
         </div>
 
         <div className="field">
           <label htmlFor="gameTitle">Primary game/title (optional)</label>
-          <input className="input" id="gameTitle" name="gameTitle" maxLength={80} autoComplete="off" />
+          <input
+            className="input"
+            id="gameTitle"
+            name="gameTitle"
+            maxLength={80}
+            autoComplete="off"
+            aria-invalid={Boolean(firstError(fieldErrors, "gameTitle"))}
+            aria-describedby={firstError(fieldErrors, "gameTitle") ? fieldErrorId("gameTitle") : undefined}
+          />
+          {firstError(fieldErrors, "gameTitle") ? (
+            <span id={fieldErrorId("gameTitle")} className="field-error">{firstError(fieldErrors, "gameTitle")}</span>
+          ) : null}
         </div>
 
         <div className="field field-span-2">
@@ -186,9 +202,12 @@ export function ApplicationForm() {
             minLength={20}
             maxLength={2000}
             aria-invalid={Boolean(firstError(fieldErrors, "goals"))}
+            aria-describedby={firstError(fieldErrors, "goals") ? fieldErrorId("goals") : undefined}
             required
           />
-          {firstError(fieldErrors, "goals") ? <span className="field-error">{firstError(fieldErrors, "goals")}</span> : null}
+          {firstError(fieldErrors, "goals") ? (
+            <span id={fieldErrorId("goals")} className="field-error">{firstError(fieldErrors, "goals")}</span>
+          ) : null}
         </div>
 
         <div className="field field-span-2">
@@ -200,10 +219,11 @@ export function ApplicationForm() {
             minLength={20}
             maxLength={4000}
             aria-invalid={Boolean(firstError(fieldErrors, "experience"))}
+            aria-describedby={firstError(fieldErrors, "experience") ? fieldErrorId("experience") : undefined}
             required
           />
           {firstError(fieldErrors, "experience") ? (
-            <span className="field-error">{firstError(fieldErrors, "experience")}</span>
+            <span id={fieldErrorId("experience")} className="field-error">{firstError(fieldErrors, "experience")}</span>
           ) : null}
         </div>
 
@@ -216,9 +236,10 @@ export function ApplicationForm() {
             inputMode="url"
             autoComplete="off"
             aria-invalid={Boolean(firstError(fieldErrors, "portfolioUrls"))}
+            aria-describedby={firstError(fieldErrors, "portfolioUrls") ? fieldErrorId("portfolioUrls") : undefined}
           />
           {firstError(fieldErrors, "portfolioUrls") ? (
-            <span className="field-error">{firstError(fieldErrors, "portfolioUrls")}</span>
+            <span id={fieldErrorId("portfolioUrls")} className="field-error">{firstError(fieldErrors, "portfolioUrls")}</span>
           ) : null}
         </div>
       </div>
