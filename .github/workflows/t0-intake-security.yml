@@ -1,0 +1,174 @@
+name: T0 Application Intake Security
+
+on:
+  push:
+    branches:
+      - org-os-production-foundation
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: t0-intake-security-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  t0-intake-red-room:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+
+    services:
+      postgres:
+        image: postgres:16-alpine@sha256:cf78e76683b9ca8c5733cbbdce6c9262b45b6767934dd0a95e671f9a0fc20685
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: org_os
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd="pg_isready -U postgres -d org_os"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=5
+
+    env:
+      NODE_ENV: test
+      APP_ENV: staging
+      NEXT_TELEMETRY_DISABLED: "1"
+      NEXT_PUBLIC_APP_URL: http://127.0.0.1:3000
+      BETTER_AUTH_URL: http://127.0.0.1:3000
+      BETTER_AUTH_SECRET: 0123456789abcdef0123456789abcdef0123456789abcdef
+      PRIVACY_HASH_SECRET: fedcba9876543210fedcba9876543210fedcba9876543210
+      AUTH_DATABASE_URL: postgresql://org_auth:auth-ci-password@127.0.0.1:5432/org_os?options=-c%20search_path%3Dauth
+      DATABASE_URL: postgresql://org_app:app-ci-password@127.0.0.1:5432/org_os?options=-c%20search_path%3Dapp,public
+      T0_MIGRATOR_DATABASE_URL: postgresql://org_migrator:migrator-ci-password@127.0.0.1:5432/org_os
+      ALLOW_PUBLIC_SIGNUP: "false"
+      APPLICATION_INTAKE_ENABLED: "true"
+      BREAK_GLASS_PRINCIPAL: ""
+      E2E_BASE_URL: http://127.0.0.1:3000
+      E2E_T0_INTAKE: "true"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Setup Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: 24.19.0
+          package-manager-cache: false
+
+      - name: Install locked dependencies
+        run: npm ci --include=dev --no-fund --no-audit
+
+      - name: Dependency audit
+        run: npm audit --audit-level=high
+
+      - name: Prepare PostgreSQL roles and schemas
+        env:
+          PGPASSWORD: postgres
+        run: |
+          psql -h 127.0.0.1 -U postgres -d org_os -v ON_ERROR_STOP=1 <<'SQL'
+          DO $$ BEGIN
+            IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'org_auth') THEN
+              CREATE ROLE org_auth LOGIN PASSWORD 'auth-ci-password';
+            END IF;
+            IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'org_migrator') THEN
+              CREATE ROLE org_migrator LOGIN PASSWORD 'migrator-ci-password';
+            END IF;
+            IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'org_app') THEN
+              CREATE ROLE org_app LOGIN PASSWORD 'app-ci-password';
+            END IF;
+          END $$;
+          GRANT CONNECT ON DATABASE org_os TO org_auth, org_migrator, org_app;
+          GRANT CREATE ON DATABASE org_os TO org_migrator;
+          CREATE SCHEMA IF NOT EXISTS auth AUTHORIZATION org_auth;
+          CREATE SCHEMA IF NOT EXISTS app AUTHORIZATION org_migrator;
+          REVOKE CREATE ON SCHEMA app FROM PUBLIC;
+          GRANT USAGE ON SCHEMA app TO org_app;
+          SQL
+
+      - name: Migrate Better Auth schema
+        working-directory: apps/web
+        run: npm run auth:cli -- migrate --config src/lib/auth.ts --yes
+
+      - name: Apply Org application migrations
+        env:
+          PGPASSWORD: migrator-ci-password
+        run: |
+          for file in infra/db/migrations/*.sql; do
+            echo "Applying $file"
+            psql -h 127.0.0.1 -U org_migrator -d org_os -v ON_ERROR_STOP=1 -f "$file"
+          done
+
+      - name: Grant runtime application privileges
+        env:
+          PGPASSWORD: migrator-ci-password
+        run: |
+          psql -h 127.0.0.1 -U org_migrator -d org_os -v ON_ERROR_STOP=1 <<'SQL'
+          GRANT USAGE ON SCHEMA app TO org_app;
+          GRANT SELECT, INSERT, UPDATE ON ALL TABLES IN SCHEMA app TO org_app;
+          GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA app TO org_app;
+          ALTER DEFAULT PRIVILEGES FOR ROLE org_migrator IN SCHEMA app
+            GRANT SELECT, INSERT, UPDATE ON TABLES TO org_app;
+          ALTER DEFAULT PRIVILEGES FOR ROLE org_migrator IN SCHEMA app
+            GRANT USAGE, SELECT ON SEQUENCES TO org_app;
+          SQL
+
+      - name: Typecheck T0 implementation
+        run: npm run typecheck
+
+      - name: Build production app
+        run: npm run build
+
+      - name: Install Chromium
+        working-directory: apps/web
+        run: npm run playwright:cli -- install --with-deps chromium
+
+      - name: Run T0 application intake Red Room
+        working-directory: apps/web
+        run: >-
+          npm run playwright:cli -- test tests/e2e/t0-intake.spec.ts
+          --project=desktop-chrome
+
+      - name: Verify T0 database evidence independently
+        env:
+          PGPASSWORD: migrator-ci-password
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          assert_count() {
+            local expected="$1"
+            local sql="$2"
+            local actual
+            actual="$(psql -h 127.0.0.1 -U org_migrator -d org_os -At -v ON_ERROR_STOP=1 -c "$sql")"
+            if [ "$actual" != "$expected" ]; then
+              echo "ERROR: expected $expected, found $actual for: $sql"
+              exit 1
+            fi
+          }
+
+          assert_count 0 "SELECT count(*) FROM app.application WHERE email = 't0-honeypot@example.test';"
+          assert_count 1 "SELECT count(*) FROM app.application WHERE email = 't0-sequential-replay@example.test';"
+          assert_count 1 "SELECT count(*) FROM app.application WHERE email = 't0-concurrent-replay@example.test';"
+          assert_count 3 "SELECT count(*) FROM app.application WHERE email = 't0-rate-limit@example.test';"
+          assert_count 0 "SELECT count(*) FROM app.application WHERE email = 't0-rollback@example.test';"
+          assert_count 1 "SELECT count(*) FROM app.application a JOIN app.audit_event e ON e.target_id = a.id WHERE a.email = 't0-sequential-replay@example.test' AND e.domain = 'talent' AND e.action = 'application.submitted';"
+          assert_count 1 "SELECT count(*) FROM app.application a JOIN app.audit_event e ON e.target_id = a.id WHERE a.email = 't0-concurrent-replay@example.test' AND e.domain = 'talent' AND e.action = 'application.submitted';"
+          assert_count 0 "SELECT count(*) FROM app.rate_limit_bucket WHERE key_hash !~ '^[0-9a-f]{64}$';"
+
+      - name: Upload T0 Playwright evidence
+        if: always()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: t0-playwright-evidence-${{ github.run_id }}
+          path: |
+            apps/web/playwright-report
+            apps/web/test-results
+          if-no-files-found: ignore
+          retention-days: 14
