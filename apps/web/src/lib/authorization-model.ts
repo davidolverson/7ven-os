@@ -86,7 +86,8 @@ export type Permission =
   | "compliance:read"
   | "compliance:write"
   | "audit:read"
-  | "roles:manage";
+  | "roles:manage"
+  | "governance:approve";
 
 export interface RoleGrant {
   role_key: RoleKey;
@@ -110,7 +111,17 @@ const rolePermissions: Record<RoleKey, readonly Permission[]> = {
   finance_submitter: ["finance:create"],
   finance_approver: ["finance:approve"],
   finance_reconciler: ["finance:reconcile"],
-  council: ["profile:read:any", "applications:read", "grind:read", "roster:read", "competition:read", "creator:read", "compliance:read", "audit:read"],
+  council: [
+    "profile:read:any",
+    "applications:read",
+    "grind:read",
+    "roster:read",
+    "competition:read",
+    "creator:read",
+    "compliance:read",
+    "audit:read",
+    "governance:approve",
+  ],
   privileged_admin: [
     "profile:read:any",
     "applications:read",
@@ -178,6 +189,7 @@ const strongAuthPermissions = new Set<Permission>([
   "compliance:write",
   "audit:read",
   "roles:manage",
+  "governance:approve",
 ]);
 
 function roleMatchesScope(role: RoleGrant, scope?: PermissionScope) {
