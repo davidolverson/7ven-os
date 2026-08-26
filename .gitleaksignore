@@ -1,0 +1,4 @@
+# Known deterministic CI-only test fixtures introduced in the T0 workflow.
+# These two fingerprints are synthetic, non-production values. Keep the generic-api-key rule enabled globally.
+49dc3b0f2ee4476c6d3c3ac69ad5d65016a8bdc3:.github/workflows/t0-intake-security.yml:generic-api-key:44
+49dc3b0f2ee4476c6d3c3ac69ad5d65016a8bdc3:.github/workflows/t0-intake-security.yml:generic-api-key:45
