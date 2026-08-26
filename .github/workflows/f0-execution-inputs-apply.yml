@@ -1,0 +1,79 @@
+name: F0 Execution Inputs Apply
+
+on:
+  push:
+    branches:
+      - org-os-production-foundation
+
+permissions:
+  contents: write
+
+jobs:
+  apply-reviewed-execution-inputs:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Apply installed-only Playwright and pinned runner/container inputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          package_path = Path('apps/web/package.json')
+          package = json.loads(package_path.read_text())
+          package.setdefault('scripts', {})['playwright:cli'] = 'playwright'
+          package_path.write_text(json.dumps(package, indent=2) + '\n')
+
+          digest = 'sha256:cf78e76683b9ca8c5733cbbdce6c9262b45b6767934dd0a95e671f9a0fc20685'
+          for workflow_name in ('org-os-ci.yml', 'offboarding-security.yml', 'governance-security.yml'):
+              path = Path('.github/workflows') / workflow_name
+              text = path.read_text()
+              text = text.replace('runs-on: ubuntu-latest', 'runs-on: ubuntu-24.04')
+              text = text.replace('image: postgres:16-alpine', f'image: postgres:16-alpine@{digest}')
+              text = text.replace('npx playwright ', 'npm run playwright:cli -- ')
+              path.write_text(text)
+          PY
+
+          node -e "const p=require('./apps/web/package.json'); if (p.scripts?.['playwright:cli'] !== 'playwright') throw new Error('installed Playwright CLI script missing')"
+          if git grep -n -E '(^|[[:space:]])npx[[:space:]]' -- .github/workflows/org-os-ci.yml .github/workflows/offboarding-security.yml .github/workflows/governance-security.yml; then
+            echo 'ERROR: fallback-capable npx invocation remains in permanent workflows'
+            exit 1
+          fi
+          test "$(grep -h -c 'runs-on: ubuntu-24.04' .github/workflows/org-os-ci.yml .github/workflows/offboarding-security.yml .github/workflows/governance-security.yml | awk '{s+=$1} END {print s}')" = "3"
+          test "$(grep -h -c 'image: postgres:16-alpine@sha256:cf78e76683b9ca8c5733cbbdce6c9262b45b6767934dd0a95e671f9a0fc20685' .github/workflows/org-os-ci.yml .github/workflows/offboarding-security.yml .github/workflows/governance-security.yml | awk '{s+=$1} END {print s}')" = "3"
+          if git grep -n -E 'ubuntu-latest|image: postgres:16-alpine$' -- .github/workflows/org-os-ci.yml .github/workflows/offboarding-security.yml .github/workflows/governance-security.yml; then
+            echo 'ERROR: mutable runner/service input remains'
+            exit 1
+          fi
+          python - <<'PY'
+          import re
+          from pathlib import Path
+          bad=[]
+          for path in Path('.github/workflows').glob('*.yml'):
+              for n,line in enumerate(path.read_text().splitlines(),1):
+                  m=re.search(r'\buses:\s*([^\s#]+)', line)
+                  if not m:
+                      continue
+                  ref=m.group(1)
+                  if ref.startswith('./'):
+                      continue
+                  if '@' not in ref or not re.fullmatch(r'[0-9a-f]{40}', ref.rsplit('@',1)[1]):
+                      bad.append(f'{path}:{n}:{ref}')
+          if bad:
+              raise SystemExit('Mutable workflow Action refs remain:\n'+'\n'.join(bad))
+          PY
+      - name: Commit validated execution inputs and remove temporary writer
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm .github/workflows/f0-execution-inputs-apply.yml
+          git config user.name "F0 Execution Inputs Apply"
+          git config user.email "actions@users.noreply.github.com"
+          git add apps/web/package.json .github/workflows/org-os-ci.yml .github/workflows/offboarding-security.yml .github/workflows/governance-security.yml .github/workflows/f0-execution-inputs-apply.yml
+          git diff --cached --check
+          git commit -m "ci: pin runner container and Playwright execution"
+          git push origin HEAD:org-os-production-foundation
