@@ -111,20 +111,22 @@ export async function POST(request: Request) {
   }
 
   const requestCorrelationId = randomUUID();
+  const change = parsed.data;
 
   try {
-    if (parsed.data.operation === "grant") {
-      const scopeId = parsed.data.scopeType === "organization" ? null : parsed.data.scopeId ?? null;
-      const scope = permissionScope(parsed.data.scopeType, scopeId);
+    if (change.operation === "grant") {
+      const grant = change;
+      const scopeId = grant.scopeType === "organization" ? null : grant.scopeId ?? null;
+      const scope = permissionScope(grant.scopeType, scopeId);
       const principal = await requirePermission("roles:manage", scope);
 
       if (hasActiveBreakGlass(principal.roles)) {
         return jsonError(403, "BREAK_GLASS_NOT_NORMAL_GOVERNANCE", "Break-glass access cannot be used to create a normal governance request.");
       }
 
-      const endsAt = parsed.data.endsAt ? new Date(parsed.data.endsAt) : null;
+      const endsAt = grant.endsAt ? new Date(grant.endsAt) : null;
       const result = await transaction(async (client) => {
-        const lockKey = `role-change-request|grant|${parsed.data.personId}|${parsed.data.roleKey}|${parsed.data.scopeType}|${scopeId ?? "organization"}`;
+        const lockKey = `role-change-request|grant|${grant.personId}|${grant.roleKey}|${grant.scopeType}|${scopeId ?? "organization"}`;
         await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [lockKey]);
 
         const personResult = await client.query<PersonRow>(
@@ -132,7 +134,7 @@ export async function POST(request: Request) {
              FROM app.person_profile
             WHERE id = $1
             FOR UPDATE`,
-          [parsed.data.personId],
+          [grant.personId],
         );
         const person = personResult.rows[0];
         if (!person || !person.active) return { kind: "person_missing" as const };
@@ -148,7 +150,7 @@ export async function POST(request: Request) {
               AND tstzrange(starts_at, COALESCE(ends_at, 'infinity'::timestamptz), '[)')
                   && tstzrange(now(), COALESCE($5::timestamptz, 'infinity'::timestamptz), '[)')
             LIMIT 1`,
-          [parsed.data.personId, parsed.data.roleKey, parsed.data.scopeType, scopeId, endsAt],
+          [grant.personId, grant.roleKey, grant.scopeType, scopeId, endsAt],
         );
         if (existingRole.rows[0]) return { kind: "already_active" as const };
 
@@ -159,13 +161,13 @@ export async function POST(request: Request) {
            ) VALUES ('grant', $1, $2, $3, $4, $5, $6, $7, 'pending', $8)
            RETURNING id, correlation_id`,
           [
-            parsed.data.personId,
-            parsed.data.roleKey,
-            parsed.data.scopeType,
+            grant.personId,
+            grant.roleKey,
+            grant.scopeType,
             scopeId,
             endsAt,
             principal.personId,
-            parsed.data.reason,
+            grant.reason,
             requestCorrelationId,
           ],
         );
@@ -181,14 +183,14 @@ export async function POST(request: Request) {
             targetId: governanceRequest.id,
             afterState: {
               operation: "grant",
-              targetPersonId: parsed.data.personId,
-              roleKey: parsed.data.roleKey,
-              scopeType: parsed.data.scopeType,
+              targetPersonId: grant.personId,
+              roleKey: grant.roleKey,
+              scopeType: grant.scopeType,
               scopeId,
               requestedEndsAt: endsAt?.toISOString() ?? null,
               state: "pending",
             },
-            reason: parsed.data.reason,
+            reason: grant.reason,
             correlationId: governanceRequest.correlation_id,
           },
           client,
@@ -210,12 +212,13 @@ export async function POST(request: Request) {
       );
     }
 
+    const revoke = change;
     const assignmentResult = await query<AssignmentRow>(
       `SELECT id, person_id, role_key, scope_type, scope_id, starts_at, ends_at, revoked_at
          FROM app.role_assignment
         WHERE id = $1
         LIMIT 1`,
-      [parsed.data.roleAssignmentId],
+      [revoke.roleAssignmentId],
     );
     const assignmentSnapshot = assignmentResult.rows[0];
     if (!assignmentSnapshot) {
@@ -232,14 +235,14 @@ export async function POST(request: Request) {
     }
 
     const result = await transaction(async (client) => {
-      await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [`role-change-request|revoke|${parsed.data.roleAssignmentId}`]);
+      await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [`role-change-request|revoke|${revoke.roleAssignmentId}`]);
 
       const selected = await client.query<AssignmentRow>(
         `SELECT id, person_id, role_key, scope_type, scope_id, starts_at, ends_at, revoked_at
            FROM app.role_assignment
           WHERE id = $1
           FOR UPDATE`,
-        [parsed.data.roleAssignmentId],
+        [revoke.roleAssignmentId],
       );
       const assignment = selected.rows[0];
       if (!assignment) return { kind: "missing" as const };
@@ -261,7 +264,7 @@ export async function POST(request: Request) {
           assignment.scope_type,
           assignment.scope_id,
           principal.personId,
-          parsed.data.reason,
+          revoke.reason,
           requestCorrelationId,
         ],
       );
@@ -284,7 +287,7 @@ export async function POST(request: Request) {
             scopeId: assignment.scope_id,
             state: "pending",
           },
-          reason: parsed.data.reason,
+          reason: revoke.reason,
           correlationId: governanceRequest.correlation_id,
         },
         client,
