@@ -144,8 +144,6 @@ export async function POST(request: Request) {
       );
     }
 
-    // Phase 1 is the fail-closed security boundary. It removes all currently modeled Org
-    // authority before any call into the separately governed identity domain.
     const phaseOne = await transaction(async (client) => {
       await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [`offboard:${parsed.data.targetPersonId}`]);
 
@@ -249,10 +247,7 @@ export async function POST(request: Request) {
             action: "organizational_access.offboarded",
             targetType: "person_profile",
             targetId: target.id,
-            beforeState: {
-              active: wasActive,
-              membershipStatus: previousMembershipStatus,
-            },
+            beforeState: { active: wasActive, membershipStatus: previousMembershipStatus },
             afterState: {
               active: false,
               membershipStatus: "inactive",
@@ -267,18 +262,18 @@ export async function POST(request: Request) {
             correlationId: execution.correlation_id,
             metadata: {
               decisionRef: parsed.data.decisionRef,
-              revokedRoleCount: revokedRoles.rowCount,
-              endedRosterCount: endedRosters.rowCount,
-              disconnectedIdentityCount: disconnectedIdentities.rowCount,
+              revokedRoleCount: revokedRoles.rowCount ?? 0,
+              endedRosterCount: endedRosters.rowCount ?? 0,
+              disconnectedIdentityCount: disconnectedIdentities.rowCount ?? 0,
               projectionJobCount: projectionJobIds.length,
             },
           },
           client,
         );
       } else if (
-        revokedRoles.rowCount > 0 ||
-        endedRosters.rowCount > 0 ||
-        disconnectedIdentities.rowCount > 0
+        (revokedRoles.rowCount ?? 0) > 0 ||
+        (endedRosters.rowCount ?? 0) > 0 ||
+        (disconnectedIdentities.rowCount ?? 0) > 0
       ) {
         await writeAuditEvent(
           {
@@ -318,10 +313,7 @@ export async function POST(request: Request) {
     if (phaseOne.kind === "decision_conflict") {
       return NextResponse.json(
         {
-          error: {
-            code: "OFFBOARDING_ALREADY_IN_PROGRESS",
-            message: "A different offboarding decision is already incomplete for this person.",
-          },
+          error: { code: "OFFBOARDING_ALREADY_IN_PROGRESS", message: "A different offboarding decision is already incomplete for this person." },
           executionId: phaseOne.execution.id,
           orgAccessDisabled: true,
         },
@@ -346,9 +338,6 @@ export async function POST(request: Request) {
     const { target, execution } = phaseOne;
     const identityAttemptToken = randomUUID();
 
-    // Phase 2 is a fenced claim. Only one request may perform identity cleanup at a time.
-    // A stale claim may be recovered after the lease, but its old token can no longer
-    // finalize state, which prevents duplicate success/failure evidence.
     const claim = await transaction(async (client) => {
       const claimed = await client.query<OffboardingExecutionRow>(
         `UPDATE app.offboarding_execution
@@ -401,13 +390,9 @@ export async function POST(request: Request) {
           { status: 200, headers: { "Cache-Control": "no-store" } },
         );
       }
-
       return NextResponse.json(
         {
-          error: {
-            code: "IDENTITY_REVOCATION_IN_PROGRESS",
-            message: "Organizational access is disabled and identity cleanup is already in progress.",
-          },
+          error: { code: "IDENTITY_REVOCATION_IN_PROGRESS", message: "Organizational access is disabled and identity cleanup is already in progress." },
           executionId: claim.execution.id,
           orgAccessDisabled: true,
           identityRevocationPending: true,
@@ -418,22 +403,13 @@ export async function POST(request: Request) {
     }
 
     try {
-      // Demote first so a later ban failure cannot leave identity-admin authority available.
-      // Better Auth 1.7.1 banUser then disables future sign-in and revokes existing sessions.
-      await auth.api.setRole({
-        headers: requestHeaders,
-        body: { userId: target.auth_user_id, role: "user" },
-      });
+      await auth.api.setRole({ headers: requestHeaders, body: { userId: target.auth_user_id, role: "user" } });
       await auth.api.banUser({
         headers: requestHeaders,
-        body: {
-          userId: target.auth_user_id,
-          banReason: "Organizational access offboarding",
-        },
+        body: { userId: target.auth_user_id, banReason: "Organizational access offboarding" },
       });
     } catch (error) {
       const errorCode = sanitizedIdentityErrorCode(error);
-
       const failureRecorded = await transaction(async (client) => {
         const updated = await client.query<IdRow>(
           `UPDATE app.offboarding_execution
@@ -457,17 +433,10 @@ export async function POST(request: Request) {
             action: "identity_access.revocation_failed",
             targetType: "person_profile",
             targetId: target.id,
-            afterState: {
-              orgAccessDisabled: true,
-              identityState: "failed",
-              offboardingExecutionId: execution.id,
-            },
+            afterState: { orgAccessDisabled: true, identityState: "failed", offboardingExecutionId: execution.id },
             reason: parsed.data.reason,
             correlationId: execution.correlation_id,
-            metadata: {
-              decisionRef: parsed.data.decisionRef,
-              errorCode,
-            },
+            metadata: { decisionRef: parsed.data.decisionRef, errorCode },
           },
           client,
         );
@@ -477,10 +446,7 @@ export async function POST(request: Request) {
       if (!failureRecorded) {
         return NextResponse.json(
           {
-            error: {
-              code: "OFFBOARDING_ATTEMPT_SUPERSEDED",
-              message: "Organizational access remains disabled, but this identity cleanup attempt was superseded by a newer attempt.",
-            },
+            error: { code: "OFFBOARDING_ATTEMPT_SUPERSEDED", message: "Organizational access remains disabled, but this identity cleanup attempt was superseded by a newer attempt." },
             executionId: execution.id,
             orgAccessDisabled: true,
             identityRevocationPending: true,
@@ -499,10 +465,7 @@ export async function POST(request: Request) {
 
       return NextResponse.json(
         {
-          error: {
-            code: "IDENTITY_REVOCATION_PENDING",
-            message: "Organizational access is disabled, but identity cleanup did not complete and must be retried.",
-          },
+          error: { code: "IDENTITY_REVOCATION_PENDING", message: "Organizational access is disabled, but identity cleanup did not complete and must be retried." },
           executionId: execution.id,
           orgAccessDisabled: true,
           identityRevocationPending: true,
@@ -555,10 +518,7 @@ export async function POST(request: Request) {
     if (!completed) {
       return NextResponse.json(
         {
-          error: {
-            code: "OFFBOARDING_ATTEMPT_SUPERSEDED",
-            message: "Organizational access remains disabled, but this identity cleanup attempt was superseded by a newer attempt.",
-          },
+          error: { code: "OFFBOARDING_ATTEMPT_SUPERSEDED", message: "Organizational access remains disabled, but this identity cleanup attempt was superseded by a newer attempt." },
           executionId: execution.id,
           orgAccessDisabled: true,
           identityRevocationPending: true,
@@ -583,7 +543,6 @@ export async function POST(request: Request) {
   } catch (error) {
     const denied = accessErrorResponse(error);
     if (denied) return denied;
-
     console.error("organizational offboarding failed", { correlationId: requestCorrelationId, error });
     return jsonError(500, "OFFBOARD_FAILED", "Organizational access could not be offboarded.");
   }
