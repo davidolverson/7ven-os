@@ -74,12 +74,11 @@ async function enrollAndChallengeTotp(page: import("@playwright/test").Page) {
   await page.getByLabel("6-digit code").fill(totpCode(totpURI, 1));
   await page.getByRole("button", { name: "Verify", exact: true }).click();
   await expect(page).toHaveURL(/\/dashboard$/);
-  return totpURI;
 }
 
 test.describe.configure({ mode: "serial", retries: 0 });
 
-test("offboarding disables Org access before identity cleanup and preserves retryable failure state", async ({ browser, page }, testInfo) => {
+test("offboarding is fail-closed, race-fenced, replay-safe, and retryable across Org and identity domains", async ({ browser, page }, testInfo) => {
   test.skip(testInfo.project.name !== "desktop-chrome", "Stateful offboarding acceptance proof runs once on isolated Chromium identities.");
 
   const targetContext = await browser.newContext();
@@ -89,18 +88,40 @@ test("offboarding disables Org access before identity cleanup and preserves retr
 
   await enrollAndChallengeTotp(page);
 
-  const successResponse = await page.request.post("/api/admin/access/offboard", {
-    headers: { origin: baseOrigin },
-    data: {
-      targetPersonId,
-      decisionRef: "E2E-OFFBOARD-SUCCESS",
-      reason: "E2E successful offboarding must disable Org access before identity cleanup.",
-    },
-  });
-  expect(successResponse.status()).toBe(200);
-  expect(successResponse.headers()["cache-control"]).toContain("no-store");
-  const successBody = await successResponse.json();
-  expect(successBody).toMatchObject({
+  const successPayload = {
+    targetPersonId,
+    decisionRef: "E2E-OFFBOARD-SUCCESS",
+    reason: "E2E successful offboarding must disable Org access before identity cleanup.",
+  };
+
+  const concurrentResponses = await Promise.all([
+    page.request.post("/api/admin/access/offboard", { headers: { origin: baseOrigin }, data: successPayload }),
+    page.request.post("/api/admin/access/offboard", { headers: { origin: baseOrigin }, data: successPayload }),
+  ]);
+  const concurrentResults = await Promise.all(
+    concurrentResponses.map(async (response) => ({
+      status: response.status(),
+      cacheControl: response.headers()["cache-control"] ?? "",
+      body: await response.json(),
+    })),
+  );
+
+  for (const result of concurrentResults) {
+    expect([200, 409]).toContain(result.status);
+    expect(result.cacheControl).toContain("no-store");
+    if (result.status === 409) {
+      expect(result.body).toMatchObject({
+        error: { code: "IDENTITY_REVOCATION_IN_PROGRESS" },
+        orgAccessDisabled: true,
+        identityRevocationPending: true,
+      });
+    }
+  }
+
+  const completedResult = concurrentResults.find(
+    (result) => result.status === 200 && result.body?.ok === true && result.body?.replay === false,
+  );
+  expect(completedResult?.body).toMatchObject({
     ok: true,
     replay: false,
     targetPersonId,
@@ -114,26 +135,25 @@ test("offboarding disables Org access before identity cleanup and preserves retr
 
   await passwordSignIn(targetPage, targetEmail, targetPassword);
   await expect(targetPage).toHaveURL(/\/sign-in$/);
-  await expect(targetPage.getByRole("alert")).toContainText("Sign-in failed. Check your credentials or account status.");
+  await expect(targetPage.locator(".form-error[role='alert']")).toContainText(
+    "Sign-in failed. Check your credentials or account status.",
+  );
 
   const replayResponse = await page.request.post("/api/admin/access/offboard", {
     headers: { origin: baseOrigin },
-    data: {
-      targetPersonId,
-      decisionRef: "E2E-OFFBOARD-SUCCESS",
-      reason: "E2E successful offboarding must disable Org access before identity cleanup.",
-    },
+    data: successPayload,
   });
   expect(replayResponse.status()).toBe(200);
   expect(await replayResponse.json()).toMatchObject({ ok: true, replay: true, state: "complete" });
 
+  const failedPayload = {
+    targetPersonId: phantomPersonId,
+    decisionRef: "E2E-OFFBOARD-PARTIAL",
+    reason: "E2E missing auth identity must leave Org access disabled and identity cleanup retryable.",
+  };
   const failedIdentityResponse = await page.request.post("/api/admin/access/offboard", {
     headers: { origin: baseOrigin },
-    data: {
-      targetPersonId: phantomPersonId,
-      decisionRef: "E2E-OFFBOARD-PARTIAL",
-      reason: "E2E missing auth identity must leave Org access disabled and identity cleanup retryable.",
-    },
+    data: failedPayload,
   });
   expect(failedIdentityResponse.status()).toBe(502);
   const failedBody = await failedIdentityResponse.json();
@@ -147,11 +167,7 @@ test("offboarding disables Org access before identity cleanup and preserves retr
 
   const retryResponse = await page.request.post("/api/admin/access/offboard", {
     headers: { origin: baseOrigin },
-    data: {
-      targetPersonId: phantomPersonId,
-      decisionRef: "E2E-OFFBOARD-PARTIAL",
-      reason: "E2E missing auth identity must leave Org access disabled and identity cleanup retryable.",
-    },
+    data: failedPayload,
   });
   expect(retryResponse.status()).toBe(502);
   const retryBody = await retryResponse.json();
