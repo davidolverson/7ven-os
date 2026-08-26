@@ -1,0 +1,66 @@
+name: U0 Accessibility Red Room
+
+on:
+  push:
+    branches:
+      - org-os-production-foundation
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: u0-accessibility-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  u0-accessibility-red-room:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+
+    env:
+      NODE_ENV: test
+      APP_ENV: staging
+      NEXT_TELEMETRY_DISABLED: "1"
+      NEXT_PUBLIC_APP_URL: http://127.0.0.1:3000
+      BETTER_AUTH_URL: http://127.0.0.1:3000
+      BETTER_AUTH_SECRET: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+      PRIVACY_HASH_SECRET: bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+      AUTH_DATABASE_URL: postgresql://u0:u0@127.0.0.1:5432/u0
+      DATABASE_URL: postgresql://u0:u0@127.0.0.1:5432/u0
+      ALLOW_PUBLIC_SIGNUP: "false"
+      APPLICATION_INTAKE_ENABLED: "true"
+      BREAK_GLASS_PRINCIPAL: ""
+      E2E_BASE_URL: http://127.0.0.1:3000
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Setup Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: 24.19.0
+          package-manager-cache: false
+
+      - name: Install locked dependencies
+        run: npm ci --include=dev --no-fund --no-audit
+
+      - name: Typecheck U0 implementation
+        run: npm run typecheck
+
+      - name: Build production app
+        run: npm run build
+
+      - name: Install U0 browser engines
+        working-directory: apps/web
+        run: npm run playwright:cli -- install --with-deps chromium webkit
+
+      - name: Run application accessibility Red Room
+        working-directory: apps/web
+        run: >-
+          npm run playwright:cli -- test tests/e2e/u0-intake.spec.ts
+          --project=desktop-chrome
+          --project=mobile-safari
